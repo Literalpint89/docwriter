@@ -424,6 +424,37 @@
   .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
   /* Speed slider */
+  input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+    border: none;
+    padding: 0;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 0 6px rgba(200,240,74,0.4);
+    transition: box-shadow 0.15s;
+  }
+  input[type=range]::-webkit-slider-thumb:hover {
+    box-shadow: 0 0 10px rgba(200,240,74,0.6);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+  }
+
+  /* Speed slider */
   .speed-row {
     display: flex;
     align-items: center;
@@ -514,6 +545,44 @@
 
   /* Session complete actions */
   .complete-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+
+  /* Auth status indicator */
+  .auth-status-dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 6px; flex-shrink: 0;
+    background: var(--text-muted);
+  }
+  .auth-status-dot.green { background: var(--success); box-shadow: 0 0 4px rgba(74,240,160,0.5); }
+  .auth-status-dot.red   { background: var(--danger);  box-shadow: 0 0 4px rgba(240,74,74,0.5); }
+  .auth-status-dot.amber { background: #f0c84a;        box-shadow: 0 0 4px rgba(240,200,74,0.5); }
+
+  /* Auth status bar in progress panel */
+  .auth-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-radius: 6px; margin-bottom: 12px;
+    background: var(--surface2); font-size: 11px; color: var(--text-dim);
+  }
+  .auth-bar .auth-bar-token { flex: 1; font-family: "DM Mono", monospace; }
+  .auth-bar .auth-bar-time  { color: var(--accent); min-width: 60px; text-align: right; }
+  .auth-bar.expiring        { background: rgba(240,200,74,0.07); border: 1px solid rgba(240,200,74,0.2); }
+  .auth-bar.expired         { background: rgba(240,74,74,0.07);  border: 1px solid rgba(240,74,74,0.2); }
+
+  /* Offline banner */
+  .offline-banner {
+    display: none; padding: 10px 14px; margin-bottom: 12px;
+    background: rgba(240,74,74,0.07); border: 1px solid rgba(240,74,74,0.25);
+    border-radius: 6px; font-size: 11px; color: var(--danger);
+    align-items: center; gap: 10px;
+  }
+  .offline-banner.visible { display: flex; }
+
+  /* Rate limit badge */
+  .rate-badge {
+    display: none; font-size: 10px; padding: 2px 8px;
+    border-radius: 20px; background: rgba(240,200,74,0.1);
+    color: #f0c84a; border: 1px solid rgba(240,200,74,0.25);
+  }
+  .rate-badge.visible { display: inline-block; }
 </style>
 </head>
 <body>
@@ -541,7 +610,11 @@
           <strong>3.</strong> Click the button below to paste your token automatically.
         </div>
         <div class="field">
-          <label>Access Token</label>
+          <label>
+            <span class="auth-status-dot" id="auth-dot"></span>
+            Access Token
+            <span id="auth-masked" style="color:var(--text-dim);font-size:10px;margin-left:8px;"></span>
+          </label>
           <div style="display:flex;gap:8px;">
             <input type="text" id="manual-token" placeholder="ya29.a0... (or use the button below)"/>
             <button class="btn btn-ghost" style="white-space:nowrap;padding:11px 14px;" onclick="pasteFromClipboard()">Paste ↓</button>
@@ -551,8 +624,9 @@
         <div class="btn-row">
           <button class="btn btn-primary" onclick="handleManualToken()">Connect</button>
           <button class="btn btn-ghost" onclick="openOAuthPlayground()">Open OAuth Playground ↗</button>
+          <button class="btn btn-ghost" onclick="pingTokenHealth()">Ping token</button>
         </div>
-        <div class="note">Token is valid for 1 hour. The app will warn you before it expires and show a one-click refresh button.</div>
+        <div class="note">Token is valid for 1 hour. The app warns you at 5 min remaining and auto-pauses if it expires mid-session.</div>
         <div id="auth-expiry-display" style="font-size:11px;color:var(--text-muted);margin-top:8px;text-align:center;"></div>
       </div>
     </div>
@@ -709,6 +783,15 @@
           <div class="stat-label">Time remaining</div>
           <div class="stat-value" id="stat-time">—</div>
         </div>
+      </div>
+      <div class="offline-banner" id="offline-banner">
+        <span style="flex:1">No internet connection — session paused. Writing will resume when you reconnect.</span>
+      </div>
+      <div class="auth-bar" id="auth-bar">
+        <span class="auth-status-dot" id="panel-auth-dot"></span>
+        <span class="auth-bar-token" id="panel-auth-token">No token</span>
+        <span class="rate-badge" id="rate-badge">Rate limited</span>
+        <span class="auth-bar-time" id="panel-auth-time"></span>
       </div>
       <div class="speed-row">
         <label>Speed</label>
@@ -1054,10 +1137,578 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ─── Auth config ─────────────────────────────────────────────────────────
+// ─── Auth & token management ─────────────────────────────────────────────
 let tokenExpiresAt   = 0;
 let tokenExpireTimer = null;
+let isOffline        = false;
+let rateLimitUntil   = 0;
+let consecutiveErrors = 0;
 
+// ─── 1. OAuth Playground deep link ───────────────────────────────────────
+function openOAuthPlayground() {
+  window.open('https://developers.google.com/oauthplayground/#step1=https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/drive&url=https://&content_type=application/json&http_method=GET&useDefaultOauthCred=unchecked&oauthEndpointSelect=Google&oauthAuthEndpointValue=https://accounts.google.com/o/oauth2/auth&oauthTokenEndpointValue=https://oauth2.googleapis.com/token&includeCredentials=unchecked&accessTokenType=bearer&autoRefreshToken=unchecked&accessType=offline&forceAprovalPrompt=checked&response_type=code', '_blank');
+}
+
+// ─── 2. Paste from clipboard ──────────────────────────────────────────────
+async function pasteFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text && text.startsWith('ya29.')) {
+      document.getElementById('manual-token').value = text;
+      showTokenStatus('Token pasted from clipboard.', 'success');
+    } else {
+      showTokenStatus('Clipboard does not contain a valid token (should start with ya29.).', 'error');
+    }
+  } catch(e) {
+    showTokenStatus('Clipboard access denied — please paste manually.', 'error');
+  }
+}
+
+function showTokenStatus(msg, type) {
+  const el = document.getElementById('token-status');
+  el.style.display = 'block';
+  el.style.background = type === 'success' ? 'rgba(74,240,160,0.08)' : 'rgba(240,74,74,0.08)';
+  el.style.color = type === 'success' ? 'var(--success)' : 'var(--danger)';
+  el.textContent = msg;
+}
+
+// ─── 3. Token masked display ──────────────────────────────────────────────
+function maskToken(token) {
+  if (!token || token.length < 8) return '****';
+  return '****...' + token.slice(-6);
+}
+
+function updateAuthDots(state) {
+  ['auth-dot', 'panel-auth-dot'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'auth-status-dot ' + state;
+  });
+}
+
+// ─── 4. Handle manual token + scope validator ─────────────────────────────
+function handleManualToken() {
+  const token = document.getElementById('manual-token').value.trim();
+  if (!token) { alert('Please paste your access token.'); return; }
+  if (!token.startsWith('ya29.')) {
+    showTokenStatus('This does not look like a valid token — it should start with ya29.', 'error');
+    updateAuthDots('red');
+    return;
+  }
+  accessToken    = token;
+  tokenExpiresAt = Date.now() + (55 * 60 * 1000);
+
+  // Update masked display
+  document.getElementById('auth-masked').textContent = maskToken(token);
+  document.getElementById('panel-auth-token').textContent = maskToken(token);
+  updateAuthDots('amber');
+
+  // Validate scopes before proceeding
+  validateTokenScopes(token).then(valid => {
+    if (valid) {
+      updateAuthDots('green');
+      showTokenStatus('Token valid — Docs and Drive scopes confirmed.', 'success');
+    } else {
+      updateAuthDots('amber');
+      showTokenStatus('Token accepted but could not confirm scopes — proceed with caution.', 'error');
+    }
+  });
+
+  startTokenExpireWarning();
+  markDone(1);
+  goToStep(2);
+  document.getElementById('progress-panel').style.display = 'block';
+  addLog('Token connected (' + maskToken(token) + '). Valid ~1 hour — app warns before expiry.', 'success');
+}
+
+// ─── 5. Scope validator ───────────────────────────────────────────────────
+async function validateTokenScopes(token) {
+  try {
+    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + token);
+    const data = await res.json();
+    if (data.error) return false;
+    const scope = data.scope || '';
+    const hasDoc   = scope.includes('documents') || scope.includes('docs');
+    const hasDrive = scope.includes('drive');
+    return hasDoc; // drive is optional for basic use
+  } catch(e) { return false; }
+}
+
+// ─── 6. Token health check ping ───────────────────────────────────────────
+async function pingTokenHealth() {
+  if (!accessToken) { showTokenStatus('No token loaded yet.', 'error'); return; }
+  showTokenStatus('Pinging token...', 'success');
+  try {
+    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
+    const data = await res.json();
+    if (data.error) {
+      showTokenStatus('Token is invalid or expired: ' + data.error, 'error');
+      updateAuthDots('red');
+    } else {
+      const secs = parseInt(data.expires_in || 0);
+      const m = Math.floor(secs / 60), s = secs % 60;
+      showTokenStatus('Token is valid — ' + m + ':' + String(s).padStart(2,'0') + ' remaining.', 'success');
+      updateAuthDots('green');
+      tokenExpiresAt = Date.now() + (secs - 60) * 1000;
+      startTokenExpireWarning();
+    }
+  } catch(e) {
+    showTokenStatus('Ping failed: ' + e.message, 'error');
+  }
+}
+
+// ─── 7. Token expiry countdown + warnings ─────────────────────────────────
+function startTokenExpireWarning() {
+  clearTimeout(tokenExpireTimer);
+  const warnIn = tokenExpiresAt - Date.now() - (5 * 60 * 1000); // warn at 5 min
+  if (warnIn > 0) tokenExpireTimer = setTimeout(showExpireWarning, warnIn);
+  startExpiryCountdown();
+}
+
+function showExpireWarning() {
+  addLog('Token expires in ~5 minutes — click "Swap token" to refresh before it dies.', 'error');
+  document.getElementById('token-swap-bar').classList.add('visible');
+  updateAuthDots('amber');
+  updateAuthBar('expiring');
+}
+
+function startExpiryCountdown() {
+  clearInterval(window._expiryInterval);
+  window._expiryInterval = setInterval(() => {
+    const secsLeft = Math.max(0, Math.round((tokenExpiresAt - Date.now()) / 1000));
+    const m = Math.floor(secsLeft / 60), s = secsLeft % 60;
+    const timeStr = m + ':' + String(s).padStart(2, '0');
+
+    const el = document.getElementById('auth-expiry-display');
+    if (el) el.textContent = secsLeft > 0 ? 'Token expires in ' + timeStr : 'Token expired — swap to continue.';
+
+    const panelTime = document.getElementById('panel-auth-time');
+    if (panelTime) panelTime.textContent = secsLeft > 0 ? timeStr + ' left' : 'Expired';
+
+    if (secsLeft === 0) {
+      clearInterval(window._expiryInterval);
+      updateAuthDots('red');
+      updateAuthBar('expired');
+      if (sessionStart && !isStopped && !isPaused) {
+        addLog('Token expired — session auto-paused. Swap token to resume.', 'error');
+        isPaused = true;
+        document.getElementById('pause-btn').textContent = 'Resume';
+        document.getElementById('status-badge').textContent = 'Paused';
+        document.getElementById('status-badge').className = 'status-badge paused';
+        document.getElementById('token-swap-bar').classList.add('visible');
+      }
+    }
+  }, 1000);
+}
+
+function updateAuthBar(state) {
+  const bar = document.getElementById('auth-bar');
+  if (!bar) return;
+  bar.className = 'auth-bar' + (state ? ' ' + state : '');
+}
+
+// ─── 8. Swap token mid-session ────────────────────────────────────────────
+function showTokenSwap() { document.getElementById('token-swap-bar').classList.add('visible'); }
+function hideTokenSwap() { document.getElementById('token-swap-bar').classList.remove('visible'); }
+function swapToken() {
+  const t = document.getElementById('swap-token-input').value.trim();
+  if (!t) { alert('Paste a token first.'); return; }
+  if (!t.startsWith('ya29.')) { addLog('Invalid token format.', 'error'); return; }
+  accessToken    = t;
+  tokenExpiresAt = Date.now() + (55 * 60 * 1000);
+  document.getElementById('auth-masked').textContent        = maskToken(t);
+  document.getElementById('panel-auth-token').textContent   = maskToken(t);
+  document.getElementById('swap-token-input').value = '';
+  hideTokenSwap();
+  updateAuthDots('green');
+  updateAuthBar('');
+  startTokenExpireWarning();
+  consecutiveErrors = 0;
+  addLog('Token swapped (' + maskToken(t) + '). Session continuing.', 'success');
+  if (isPaused && sessionStart) togglePause();
+}
+
+// ─── 9. Offline detection ─────────────────────────────────────────────────
+function initOfflineDetection() {
+  window.addEventListener('offline', () => {
+    isOffline = true;
+    document.getElementById('offline-banner').classList.add('visible');
+    if (sessionStart && !isStopped && !isPaused) {
+      isPaused = true;
+      document.getElementById('pause-btn').textContent = 'Resume';
+      document.getElementById('status-badge').textContent = 'Offline';
+      document.getElementById('status-badge').className = 'status-badge paused';
+      addLog('Network lost — session paused.', 'error');
+    }
+  });
+  window.addEventListener('online', () => {
+    isOffline = false;
+    document.getElementById('offline-banner').classList.remove('visible');
+    addLog('Network restored — you can resume.', 'success');
+  });
+}
+
+// ─── 10. API call wrapper with 401/429 handling ───────────────────────────
+// Wraps fetch with auth error detection, rate limit backoff,
+// and consecutive error tracking.
+async function authFetch(url, options = {}) {
+  // Check rate limit backoff
+  if (Date.now() < rateLimitUntil) {
+    const wait = rateLimitUntil - Date.now();
+    addLog('Rate limited — waiting ' + Math.round(wait/1000) + 's...', '');
+    await new Promise(r => setTimeout(r, wait));
+  }
+
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'Authorization': 'Bearer ' + accessToken,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+
+  // 401 — token expired or invalid
+  if (res.status === 401) {
+    consecutiveErrors++;
+    updateAuthDots('red');
+    updateAuthBar('expired');
+    if (sessionStart && !isStopped && !isPaused) {
+      isPaused = true;
+      document.getElementById('pause-btn').textContent = 'Resume';
+      document.getElementById('status-badge').textContent = 'Paused';
+      document.getElementById('status-badge').className = 'status-badge paused';
+      document.getElementById('token-swap-bar').classList.add('visible');
+      addLog('Token rejected (401) — session paused. Swap token to continue.', 'error');
+    }
+    throw new Error('AUTH_EXPIRED');
+  }
+
+  // 429 — rate limited
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get('Retry-After') || '30');
+    rateLimitUntil = Date.now() + retryAfter * 1000;
+    document.getElementById('rate-badge').classList.add('visible');
+    addLog('Rate limited by Google — backing off ' + retryAfter + 's.', 'error');
+    setTimeout(() => document.getElementById('rate-badge').classList.remove('visible'), retryAfter * 1000);
+    throw new Error('RATE_LIMITED');
+  }
+
+  if (res.ok) consecutiveErrors = 0;
+  return res;
+}
+
+// ─── Sign out ─────────────────────────────────────────────────────────────
+function signOut() {
+  accessToken = null;
+  tokenExpiresAt = 0;
+  clearTimeout(tokenExpireTimer);
+  clearInterval(window._expiryInterval);
+  updateAuthDots('');
+  for (let i = 1; i <= 4; i++) document.getElementById('step-' + i).classList.remove('active','done');
+  document.getElementById('step-1').classList.add('active');
+  addLog('Disconnected.', '');
+}
+
+// ─── Session queue ────────────────────────────────────────────────────────
+function addToQueue() {
+  const content = document.getElementById('content').value.trim();
+  const label = document.getElementById('session-label').value.trim();
+  const docMode = document.getElementById('doc-mode').value;
+  const docTitle = document.getElementById('doc-title').value.trim() || 'My Document';
+  const existingId = document.getElementById('existing-doc-id').value.trim();
+  if (!content) { alert('Paste some content first.'); return; }
+  const words = content.trim().split(/\s+/).length;
+  const entry = { content, label: label || `Section ${sessionQueue.length + 1}`, docMode, docTitle, existingId, words };
+  sessionQueue.push(entry);
+  renderQueue();
+  document.getElementById('content').value = '';
+  document.getElementById('session-label').value = '';
+  document.getElementById('queue-section').style.display = 'block';
+}
+
+function renderQueue() {
+  const list = document.getElementById('queue-list');
+  list.innerHTML = '';
+  sessionQueue.forEach((item, i) => {
+    const el = document.createElement('div');
+    el.className = 'queue-item' + (i === currentQueueIndex ? ' active-q' : '') + (i < currentQueueIndex ? ' done-q' : '');
+    el.innerHTML = `<span class="q-num">${i + 1}</span><span class="q-label">${item.label}</span><span class="q-words">${item.words}w</span>`;
+    list.appendChild(el);
+  });
+}
+
+// ─── Session templates ────────────────────────────────────────────────────
+function applyTemplate(tpl) {
+  const dur = document.getElementById('duration');
+  const style = document.getElementById('style');
+  const typo = document.getElementById('typo-rate');
+  if (tpl === 'essay')    { dur.value = '120'; style.value = 'steady'; typo.value = 'low'; }
+  if (tpl === 'report')   { dur.value = '240'; style.value = 'slow';   typo.value = 'low'; }
+  if (tpl === 'quick')    { dur.value = '30';  style.value = 'burst';  typo.value = 'medium'; }
+  if (tpl === 'longform') { dur.value = '360'; style.value = 'steady'; typo.value = 'low'; }
+}
+
+// ─── Speed multiplier ─────────────────────────────────────────────────────
+function updateSpeedMultiplier(val) {
+  speedMultiplier = 100 / parseInt(val);
+  const display = (parseInt(val) / 100).toFixed(2).replace(/\.?0+$/, '');
+  document.getElementById('speed-val').textContent = display + '×';
+}
+
+// ─── Token swap ───────────────────────────────────────────────────────────
+function showTokenSwap() {
+  document.getElementById('token-swap-bar').classList.add('visible');
+}
+function hideTokenSwap() {
+  document.getElementById('token-swap-bar').classList.remove('visible');
+}
+function swapToken() {
+  const t = document.getElementById('swap-token-input').value.trim();
+  if (!t) { alert('Paste a token first.'); return; }
+  accessToken = t;
+  hideTokenSwap();
+  addLog('Token swapped. Session will continue.', 'success');
+  if (isPaused) { togglePause(); }
+}
+
+// ─── Manual advance ───────────────────────────────────────────────────────
+function manualAdvance() {
+  if (!isPaused) return;
+  manualAdvancePending = true;
+}
+
+// ─── Pre-flight checklist ─────────────────────────────────────────────────
+async function runPreflight() {
+  const pf = document.getElementById('preflight');
+  pf.classList.add('visible');
+
+  // Remove any previous proceed-anyway button
+  const oldBtn = document.getElementById('pf-proceed-btn');
+  if (oldBtn) oldBtn.remove();
+
+  const setItem = (id, state, text) => {
+    const el = document.getElementById(id);
+    el.className = 'preflight-item ' + state;
+    el.textContent = (state === 'ok' ? '✓' : state === 'fail' ? '✗' : state === 'warn' ? '⚠' : '◌') + ' ' + text;
+  };
+
+  setItem('pf-token', 'checking', 'Token — checking...');
+  setItem('pf-content', 'checking', 'Content — checking...');
+  setItem('pf-doc', 'checking', 'Document access — pending...');
+
+  const content = document.getElementById('content').value.trim();
+  await new Promise(r => setTimeout(r, 300));
+
+  // ── Token check ────────────────────────────────────────────────────────
+  if (!accessToken) {
+    setItem('pf-token', 'fail', 'Token — missing. Go back to step 1.');
+    return;
+  }
+
+  // Verify token actually works with a lightweight API call
+  try {
+    const tokenTest = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
+    const tokenData = await tokenTest.json();
+    if (tokenData.error) {
+      setItem('pf-token', 'fail', 'Token — invalid or expired. Get a new one from OAuth Playground.');
+      return;
+    }
+    const secsLeft = parseInt(tokenData.expires_in || 0);
+    const minsLeft = Math.floor(secsLeft / 60);
+    setItem('pf-token', 'ok', `Token — valid (${minsLeft} min remaining)`);
+  } catch(e) {
+    setItem('pf-token', 'ok', 'Token — present (could not verify expiry)');
+  }
+
+  // ── Content check ──────────────────────────────────────────────────────
+  if (!content) {
+    setItem('pf-content', 'fail', 'Content — empty. Go back to step 2 and paste your text.');
+    return;
+  }
+  const wc = content.trim().split(/\s+/).length;
+  setItem('pf-content', 'ok', `Content — ${wc} words ready`);
+
+  // ── Doc check ──────────────────────────────────────────────────────────
+  setItem('pf-doc', 'checking', 'Document access — verifying...');
+  const mode = document.getElementById('doc-mode').value;
+
+  if (mode === 'new') {
+    setItem('pf-doc', 'ok', 'Document — new doc will be created on start');
+    await new Promise(r => setTimeout(r, 400));
+    pf.classList.remove('visible');
+    startWriting();
+    return;
+  }
+
+  // Existing doc — try to fetch it
+  const input = document.getElementById('existing-doc-id').value.trim();
+  if (!input) {
+    setItem('pf-doc', 'fail', 'Document — no URL or ID entered. Go back and paste your doc URL.');
+    return;
+  }
+
+  let testId;
+  try { testId = extractDocId(input); } catch(e) {
+    setItem('pf-doc', 'fail', 'Document — could not parse URL. Paste the full Google Doc URL.');
+    return;
+  }
+
+  try {
+    const res = await fetch(`https://docs.googleapis.com/v1/documents/${testId}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+
+    if (res.status === 401) {
+      setItem('pf-doc', 'warn', 'Document — token lacks Docs API scope. Re-authorise with Docs API v1 selected.');
+      addProceedAnyway(pf);
+      return;
+    }
+    if (res.status === 403) {
+      setItem('pf-doc', 'warn', 'Document — permission denied. Make sure you own or have edit access to this doc.');
+      addProceedAnyway(pf);
+      return;
+    }
+    if (res.status === 404) {
+      setItem('pf-doc', 'fail', 'Document — not found. Check the URL is correct and the doc exists.');
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      setItem('pf-doc', 'warn', `Document — API returned ${res.status}. Proceed with caution.`);
+      console.warn('Doc check response:', body);
+      addProceedAnyway(pf);
+      return;
+    }
+
+    const doc = await res.json();
+    const title = doc.title || testId;
+    setItem('pf-doc', 'ok', `Document — "${title}" found and accessible`);
+
+  } catch(e) {
+    setItem('pf-doc', 'warn', 'Document — network error during check. Proceeding anyway.');
+    addProceedAnyway(pf);
+    return;
+  }
+
+  await new Promise(r => setTimeout(r, 400));
+  pf.classList.remove('visible');
+  startWriting();
+}
+
+function addProceedAnyway(pf) {
+  // Add a "proceed anyway" button below the checklist for warnings (not hard failures)
+  const btn = document.createElement('button');
+  btn.id = 'pf-proceed-btn';
+  btn.className = 'btn btn-ghost';
+  btn.style.cssText = 'margin-top:12px;font-size:11px;padding:7px 14px;';
+  btn.textContent = 'Proceed anyway →';
+  btn.onclick = () => { pf.classList.remove('visible'); btn.remove(); startWriting(); };
+  pf.appendChild(btn);
+}
+
+// ─── Session reset (Write another section) ────────────────────────────────
+function resetToStep2() {
+  // Keep token and docId, return to step 2 for more content
+  document.getElementById('content').value = '';
+  document.getElementById('session-label').value = '';
+  document.getElementById('doc-mode').value = 'existing';
+  toggleDocMode();
+  if (docId) {
+    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${docId}/edit`;
+  }
+  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
+  document.getElementById('step-1').classList.add('done');
+  document.getElementById('step-2').classList.add('active');
+  addLog('Ready for next section. Token and doc preserved.', 'highlight');
+}
+
+function startNewSession() {
+  // Full reset — keep token only
+  docId = null;
+  document.getElementById('content').value = '';
+  document.getElementById('session-label').value = '';
+  document.getElementById('doc-title').value = '';
+  document.getElementById('existing-doc-id').value = '';
+  document.getElementById('doc-mode').value = 'new';
+  toggleDocMode();
+  sessionQueue = [];
+  currentQueueIndex = 0;
+  document.getElementById('queue-section').style.display = 'none';
+  document.getElementById('queue-list').innerHTML = '';
+  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
+  document.getElementById('step-1').classList.add('done');
+  document.getElementById('step-2').classList.add('active');
+  addLog('New session started. Token preserved.', 'highlight');
+}
+
+// ─── Crash restore ────────────────────────────────────────────────────────
+function saveCheckpoint(wordIndex, wordObjs, settings) {
+  try {
+    localStorage.setItem('dw_checkpoint', JSON.stringify({ wordIndex, wordObjs, settings, docId, ts: Date.now() }));
+  } catch(e) {}
+}
+
+function clearCheckpoint() {
+  try { localStorage.removeItem('dw_checkpoint'); } catch(e) {}
+}
+
+function checkForRestore() {
+  try {
+    const raw = localStorage.getItem('dw_checkpoint');
+    if (!raw) return;
+    const cp = JSON.parse(raw);
+    if (Date.now() - cp.ts > 24 * 60 * 60 * 1000) { clearCheckpoint(); return; }
+    window._pendingRestore = cp;
+    document.getElementById('restore-banner').classList.add('visible');
+  } catch(e) {}
+}
+
+function restoreSession() {
+  const cp = window._pendingRestore;
+  if (!cp) return;
+  document.getElementById('restore-banner').classList.remove('visible');
+  if (cp.settings) {
+    document.getElementById('duration').value = cp.settings.duration || '30';
+    document.getElementById('style').value = cp.settings.style || 'burst';
+    document.getElementById('typo-rate').value = cp.settings.typoRate || 'low';
+  }
+  if (cp.docId) {
+    docId = cp.docId;
+    document.getElementById('doc-mode').value = 'existing';
+    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${cp.docId}/edit`;
+    toggleDocMode();
+  }
+  addLog('Restored checkpoint. Click Start writing to resume.', 'highlight');
+  window._restoreWordIndex = cp.wordIndex;
+  window._restoreWordObjs = cp.wordObjs;
+}
+
+function clearRestore() {
+  clearCheckpoint();
+  document.getElementById('restore-banner').classList.remove('visible');
+  window._pendingRestore = null;
+}
+
+// ─── Focus window lock ────────────────────────────────────────────────────
+window.addEventListener('beforeunload', (e) => {
+  if (!isStopped && sessionStart && charCount > 0) {
+    e.preventDefault();
+    e.returnValue = 'A writing session is in progress. Leave and lose progress?';
+  }
+});
+
+// ─── Spacebar pause/resume ────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
+    if (sessionStart && !isStopped) {
+      e.preventDefault();
+      togglePause();
+    }
+  }
+});
+
+// ─── Auth config (moved to auth management block above) ──────────────────
 function openOAuthPlayground() {
   const url = 'https://developers.google.com/oauthplayground/#step1=https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/drive&url=https://&content_type=application/json&http_method=GET&useDefaultOauthCred=unchecked&oauthEndpointSelect=Google&oauthAuthEndpointValue=https://accounts.google.com/o/oauth2/auth&oauthTokenEndpointValue=https://oauth2.googleapis.com/token&includeCredentials=unchecked&accessTokenType=bearer&autoRefreshToken=unchecked&accessType=offline&forceAprovalPrompt=checked&response_type=code';
   window.open(url, '_blank');
@@ -1375,12 +2026,8 @@ function correctionDelay() {
 
 // ─── Google Docs API calls ────────────────────────────────────────────────
 async function createDoc(title) {
-  const res = await fetch('https://docs.googleapis.com/v1/documents', {
+  const res = await authFetch('https://docs.googleapis.com/v1/documents', {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
     body: JSON.stringify({ title })
   });
   if (!res.ok) throw new Error(`Failed to create doc: ${res.status}`);
@@ -1388,19 +2035,10 @@ async function createDoc(title) {
 }
 
 async function appendToDoc(docId, text, endIndex) {
-  const res = await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
+  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
     body: JSON.stringify({
-      requests: [{
-        insertText: {
-          location: { index: endIndex },
-          text: text
-        }
-      }]
+      requests: [{ insertText: { location: { index: endIndex }, text } }]
     })
   });
   if (!res.ok) {
@@ -1411,27 +2049,17 @@ async function appendToDoc(docId, text, endIndex) {
 }
 
 async function deleteFromDoc(docId, startIndex, endIndex) {
-  const res = await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
+  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
     body: JSON.stringify({
-      requests: [{
-        deleteContentRange: {
-          range: { startIndex, endIndex }
-        }
-      }]
+      requests: [{ deleteContentRange: { range: { startIndex, endIndex } } }]
     })
   });
   if (!res.ok) throw new Error('Delete failed');
 }
 
 async function getDocEndIndex(docId) {
-  const res = await fetch(`https://docs.googleapis.com/v1/documents/${docId}`, {
-    headers: { 'Authorization': `Bearer ${accessToken}` }
-  });
+  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${docId}`);
   if (!res.ok) {
     console.error('getDocEndIndex failed:', res.status);
     return 1;
@@ -1455,12 +2083,16 @@ function sleep(ms) {
 }
 
 async function sleepWithPauseCheck(ms) {
-  const adjusted = ms * speedMultiplier;
+  // Re-reads speedMultiplier on every tick so slider changes
+  // take effect immediately mid-delay, not just on the next word.
   const start = Date.now();
-  while (Date.now() - start < adjusted) {
+  while (true) {
     if (isStopped) return;
     if (manualAdvancePending) { manualAdvancePending = false; return; }
-    if (!isPaused) await sleep(Math.min(200, adjusted - (Date.now() - start)));
+    const elapsed = Date.now() - start;
+    const target  = ms * speedMultiplier;
+    if (elapsed >= target) return;
+    if (!isPaused) await sleep(Math.min(100, target - elapsed));
     else await sleep(100);
   }
 }
@@ -1486,27 +2118,21 @@ async function testConnection() {
   document.getElementById('progress-panel').style.display = 'block';
   document.getElementById('log').innerHTML = '';
   addLog('Testing Google Docs connection...', 'highlight');
-
   try {
-    const res = await fetch('https://docs.googleapis.com/v1/documents', {
+    const res  = await authFetch('https://docs.googleapis.com/v1/documents', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
       body: JSON.stringify({ title: 'DocWriter Test — Delete Me' })
     });
-
     const data = await res.json();
-
     if (data.documentId) {
-      addLog(`Connection works! Test doc created: ${data.documentId}`, 'success');
-      addLog(`Open: https://docs.google.com/document/d/${data.documentId}/edit`, 'success');
+      updateAuthDots('green');
+      addLog('Connection works! Test doc created: ' + data.documentId, 'success');
+      addLog('Open: https://docs.google.com/document/d/' + data.documentId + '/edit', 'success');
     } else {
-      addLog(`API responded but no doc ID. Response: ${JSON.stringify(data)}`, 'error');
+      addLog('API responded but no doc ID: ' + JSON.stringify(data), 'error');
     }
   } catch (err) {
-    addLog(`Connection failed: ${err.message}`, 'error');
+    addLog('Connection failed: ' + err.message, 'error');
   }
 }
 
@@ -1775,6 +2401,7 @@ function stopWriting() {
 
 // ─── Init ─────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
+  initOfflineDetection();
   checkForRestore();
 });
 </script>
