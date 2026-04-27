@@ -1817,19 +1817,27 @@ function addLog(msg, type = '') {
 }
 
 // ─── Stats ────────────────────────────────────────────────────────────────
-let timerInterval = null;
+let timerInterval    = null;
+let effectiveElapsed = 0;   // ms of "effective" time consumed, accounting for speed
+let lastTimerTick    = null;
 
 function startLiveTimer() {
+  effectiveElapsed = 0;
+  lastTimerTick    = Date.now();
   if (timerInterval) clearInterval(timerInterval);
   timerInterval = setInterval(() => {
-    if (!sessionStart || isPaused || isStopped) return;
-    const elapsed = Date.now() - sessionStart;
-    const remaining = Math.max(0, totalDurationMs - elapsed);
+    if (!sessionStart || isStopped) return;
+    const now  = Date.now();
+    const real = now - lastTimerTick;
+    lastTimerTick = now;
+    // Only advance effective time while not paused, scaled by current speed
+    if (!isPaused) effectiveElapsed += real * (1 / speedMultiplier);
+    const remaining = Math.max(0, totalDurationMs - effectiveElapsed);
     const mins = Math.floor(remaining / 60000);
     const secs = Math.floor((remaining % 60000) / 1000);
     document.getElementById('stat-time').textContent = `${mins}:${secs.toString().padStart(2,'0')}`;
     if (remaining === 0) clearInterval(timerInterval);
-  }, 1000);
+  }, 500);
 }
 
 function updateStats() {
@@ -1859,7 +1867,7 @@ const QWERTY_ADJACENT = {
 function buildPersonality() {
   return {
     speedVariance: 0.7 + Math.random() * 0.6,      // 0.7–1.3 multiplier on delays
-    thinkFrequency: 0.08 + Math.random() * 0.08,   // how often thinking pauses occur
+    thinkFrequency: 0.02 + Math.random() * 0.02,   // how often thinking pauses occur (~1 per 25-50 words)
     distractionChance: 0.006 + Math.random() * 0.006, // very rare long pauses
     warmupWords: 8 + Math.floor(Math.random() * 12), // how many words in warmup
     fatigueStart: 0.55 + Math.random() * 0.2,       // when fatigue kicks in (% through)
@@ -1868,11 +1876,13 @@ function buildPersonality() {
 }
 
 // Detect if a word starts a heading (all-caps, or ends with a colon, or is a known heading word)
-function looksLikeHeading(word, prevWord) {
-  if (!prevWord) return false; // first word is not a heading
-  const endsWithColon = prevWord.endsWith(':');
-  const isAllCaps = /^[A-Z]{2,}$/.test(word);
-  return endsWithColon || isAllCaps;
+function looksLikeHeading(word, prevWord, isFirstWordOfPara) {
+  // All-caps word of 3+ letters (e.g. ABSTRACT, TCP/IP headings)
+  // Excludes short acronyms like TCP, LEO, GEO which are not headings
+  if (/^[A-Z]{4,}$/.test(word)) return true;
+  // Word immediately following a colon
+  if (prevWord && prevWord.endsWith(':')) return true;
+  return false;
 }
 
 // Detect sentence end in previous word
@@ -1895,8 +1905,17 @@ function buildWordList(text) {
   const words = [];
   const paragraphs = text.split(/\n\n+/);
   paragraphs.forEach((para, pi) => {
-    const paraWords = para.trim().split(/\s+/).filter(Boolean);
-    paraWords.forEach(w => words.push({ word: w, isParaBreak: false }));
+    const trimmed = para.trim();
+    const isHeadingPara = trimmed.startsWith('## ');
+    const cleanPara = isHeadingPara ? trimmed.slice(3).trim() : trimmed;
+    const paraWords = cleanPara.split(/\s+/).filter(Boolean);
+    paraWords.forEach((w, wi) => {
+      words.push({
+        word: w,
+        isParaBreak: false,
+        isHeading: isHeadingPara && wi === 0,
+      });
+    });
     if (pi < paragraphs.length - 1) {
       words.push({ word: '\n\n', isParaBreak: true });
     }
@@ -1947,9 +1966,10 @@ function computeExtraPause(wordObj, i, prevWordStr, totalWords, msPerWord, style
     extra += msPerWord * (0.3 + Math.random() * 0.4);
   }
 
-  // Heading pause
-  if (looksLikeHeading(word, prevWordStr)) {
-    extra += msPerWord * (1.5 + Math.random() * 2);
+  // Heading pause — fires on ## marked headings, all-caps words, or words after a colon
+  const isFirstWordOfPara = (prevWordStr === null);
+  if (wordObj.isHeading || looksLikeHeading(word, prevWordStr, isFirstWordOfPara)) {
+    extra += msPerWord * (2 + Math.random() * 2.5);
   }
 
   // Long word slowdown
@@ -1959,7 +1979,7 @@ function computeExtraPause(wordObj, i, prevWordStr, totalWords, msPerWord, style
 
   // Thinking pause (random, every ~10–14 words)
   if (i > 0 && Math.random() < personality.thinkFrequency) {
-    const thinkMs = msPerWord * (1.5 + Math.random() * 2.5);
+    const thinkMs = msPerWord * (0.8 + Math.random() * 1.2);
     extra += thinkMs;
     return { extra, isThink: true };
   }
