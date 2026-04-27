@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>DocWriter — Human Typing Simulator</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&display=swap" rel="stylesheet"/>
-<script src="https://accounts.google.com/gsi/client" async defer onload="initGIS()"></script>
+
 <style>
   :root {
     --bg: #0e0e0e;
@@ -534,24 +534,26 @@
         <div class="step-title">Connect to Google Docs</div>
       </div>
       <div class="step-body">
-        <div id="auth-signed-out">
-          <div class="auth-info">
-            Sign in with your Google account to connect DocWriter to Google Docs. Your token refreshes automatically — you'll never need to paste a token manually again.
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-primary" onclick="startOAuth()">Sign in with Google</button>
+        <div class="auth-info">
+          Get your access token in 3 clicks:<br><br>
+          <strong>1.</strong> <a id="oauth-link" href="#" target="_blank" style="color:var(--accent)" onclick="openOAuthPlayground()">Open OAuth Playground ↗</a> — it opens pre-configured with the right scopes.<br><br>
+          <strong>2.</strong> Click <strong>Authorise APIs</strong> → sign in → <strong>Exchange authorization code for tokens</strong>.<br><br>
+          <strong>3.</strong> Click the button below to paste your token automatically.
+        </div>
+        <div class="field">
+          <label>Access Token</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="manual-token" placeholder="ya29.a0... (or use the button below)"/>
+            <button class="btn btn-ghost" style="white-space:nowrap;padding:11px 14px;" onclick="pasteFromClipboard()">Paste ↓</button>
           </div>
         </div>
-        <div id="auth-signed-in" style="display:none;">
-          <div class="auth-info" style="border-left-color:var(--success);">
-            <strong id="auth-user-display" style="color:var(--success);">Connected</strong><br>
-            <span id="auth-expiry-display" style="color:var(--text-muted);font-size:11px;"></span>
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-ghost" onclick="signOut()">Sign out</button>
-          </div>
+        <div id="token-status" style="display:none;font-size:11px;padding:8px 12px;border-radius:6px;margin-bottom:12px;"></div>
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="handleManualToken()">Connect</button>
+          <button class="btn btn-ghost" onclick="openOAuthPlayground()">Open OAuth Playground ↗</button>
         </div>
-        <div class="note">DocWriter only requests access to Google Docs and Drive. No data is stored on any server.</div>
+        <div class="note">Token is valid for 1 hour. The app will warn you before it expires and show a one-click refresh button.</div>
+        <div id="auth-expiry-display" style="font-size:11px;color:var(--text-muted);margin-top:8px;text-align:center;"></div>
       </div>
     </div>
 
@@ -1052,103 +1054,67 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ─── Google Identity Services (GIS) token client ─────────────────────────
-// GIS uses a popup — no redirect, no backend, no client secret needed.
-// This is Google's official recommended approach for SPAs.
-const OAUTH_CLIENT_ID = '124821601232-ntdtj2ljs26jroph9gncd9doq8kk3h26.apps.googleusercontent.com';
-const OAUTH_SCOPES    = 'https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive';
+// ─── Auth config ─────────────────────────────────────────────────────────
+let tokenExpiresAt   = 0;
+let tokenExpireTimer = null;
 
-let tokenExpiresAt    = 0;
-let tokenRefreshTimer = null;
-let gisClient         = null;
-
-function initGIS() {
-  if (!window.google) {
-    setTimeout(initGIS, 200);
-    return;
-  }
-  gisClient = google.accounts.oauth2.initTokenClient({
-    client_id: OAUTH_CLIENT_ID,
-    scope:     OAUTH_SCOPES,
-    callback:  onTokenResponse,
-  });
-  // Try restore from sessionStorage
-  tryRestoreSession();
+function openOAuthPlayground() {
+  const url = 'https://developers.google.com/oauthplayground/#step1=https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/drive&url=https://&content_type=application/json&http_method=GET&useDefaultOauthCred=unchecked&oauthEndpointSelect=Google&oauthAuthEndpointValue=https://accounts.google.com/o/oauth2/auth&oauthTokenEndpointValue=https://oauth2.googleapis.com/token&includeCredentials=unchecked&accessTokenType=bearer&autoRefreshToken=unchecked&accessType=offline&forceAprovalPrompt=checked&response_type=code';
+  window.open(url, '_blank');
 }
 
-function onTokenResponse(resp) {
-  if (resp.error) {
-    addLog('Sign-in error: ' + resp.error, 'error');
+async function pasteFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text && text.startsWith('ya29.')) {
+      document.getElementById('manual-token').value = text;
+      showTokenStatus('Token pasted from clipboard.', 'success');
+    } else {
+      showTokenStatus('Clipboard doesn't contain a valid token (should start with ya29.).', 'error');
+    }
+  } catch(e) {
+    showTokenStatus('Clipboard access denied — please paste manually.', 'error');
+  }
+}
+
+function showTokenStatus(msg, type) {
+  const el = document.getElementById('token-status');
+  el.style.display = 'block';
+  el.style.background = type === 'success' ? 'rgba(74,240,160,0.08)' : 'rgba(240,74,74,0.08)';
+  el.style.color = type === 'success' ? 'var(--success)' : 'var(--danger)';
+  el.textContent = msg;
+}
+
+function handleManualToken() {
+  const token = document.getElementById('manual-token').value.trim();
+  if (!token) { alert('Please paste your access token.'); return; }
+  if (!token.startsWith('ya29.')) {
+    showTokenStatus('This doesn't look like a valid token — it should start with ya29.', 'error');
     return;
   }
-  accessToken    = resp.access_token;
-  const expiresIn = parseInt(resp.expires_in || 3600);
-  tokenExpiresAt = Date.now() + (expiresIn - 60) * 1000;
-
-  try {
-    sessionStorage.setItem('dw_access_token', accessToken);
-    sessionStorage.setItem('dw_token_expires', String(tokenExpiresAt));
-  } catch(e) {}
-
-  // Schedule silent refresh
-  clearTimeout(tokenRefreshTimer);
-  tokenRefreshTimer = setTimeout(() => {
-    addLog('Refreshing token...', '');
-    gisClient.requestAccessToken({ prompt: '' });
-  }, (expiresIn - 120) * 1000);
-
-  showSignedIn();
-  startExpiryCountdown();
+  accessToken    = token;
+  tokenExpiresAt = Date.now() + (55 * 60 * 1000); // assume ~55 min left
+  startTokenExpireWarning();
   markDone(1);
   goToStep(2);
   document.getElementById('progress-panel').style.display = 'block';
-  addLog('Signed in. Token auto-refreshes silently — no manual steps needed.', 'success');
+  addLog('Token connected. Valid for ~1 hour — app will warn you before it expires.', 'success');
 }
 
-function startOAuth() {
-  if (!gisClient) { addLog('Auth not ready yet — please wait a moment.', 'error'); return; }
-  gisClient.requestAccessToken({ prompt: 'consent' });
+function startTokenExpireWarning() {
+  clearTimeout(tokenExpireTimer);
+  // Warn at 10 minutes remaining
+  const warnIn = tokenExpiresAt - Date.now() - (10 * 60 * 1000);
+  if (warnIn > 0) {
+    tokenExpireTimer = setTimeout(showExpireWarning, warnIn);
+  }
+  startExpiryCountdown();
 }
 
-function tryRestoreSession() {
-  try {
-    const token   = sessionStorage.getItem('dw_access_token');
-    const expires = parseInt(sessionStorage.getItem('dw_token_expires') || '0');
-    if (!token || Date.now() > expires) return false;
-    accessToken    = token;
-    tokenExpiresAt = expires;
-    showSignedIn();
-    startExpiryCountdown();
-    markDone(1);
-    goToStep(2);
-    document.getElementById('progress-panel').style.display = 'block';
-    addLog('Session restored automatically.', 'success');
-    return true;
-  } catch(e) { return false; }
-}
-
-// ─── Sign out ─────────────────────────────────────────────────────────────
-// ─── Sign out ─────────────────────────────────────────────────────────────
-function signOut() {
-  accessToken = null;
-  tokenExpiresAt = 0;
-  clearTimeout(tokenRefreshTimer);
-  clearInterval(window._expiryInterval);
-  try {
-    sessionStorage.removeItem('dw_access_token');
-    sessionStorage.removeItem('dw_token_expires');
-  } catch(e) {}
-  if (window.google) google.accounts.oauth2.revoke(accessToken, () => {});
-  document.getElementById('auth-signed-in').style.display = 'none';
-  document.getElementById('auth-signed-out').style.display = 'block';
-  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active','done');
-  document.getElementById('step-1').classList.add('active');
-  addLog('Signed out.', '');
-}
-
-function showSignedIn() {
-  document.getElementById('auth-signed-out').style.display = 'none';
-  document.getElementById('auth-signed-in').style.display = 'block';
+function showExpireWarning() {
+  addLog('Token expires in ~10 minutes. Click "Swap token" in the progress panel to refresh.', 'error');
+  // Flash the swap token bar
+  document.getElementById('token-swap-bar').classList.add('visible');
 }
 
 function startExpiryCountdown() {
@@ -1157,11 +1123,22 @@ function startExpiryCountdown() {
     const secsLeft = Math.max(0, Math.round((tokenExpiresAt - Date.now()) / 1000));
     const m = Math.floor(secsLeft / 60), s = secsLeft % 60;
     const el = document.getElementById('auth-expiry-display');
-    if (el) el.textContent = secsLeft > 0
-      ? `Token refreshes in ${m}:${s.toString().padStart(2,'0')} — auto-managed`
-      : 'Refreshing token...';
-    if (secsLeft === 0) clearInterval(window._expiryInterval);
+    if (el) el.textContent = secsLeft > 0 ? `Token expires in ${m}:${s.toString().padStart(2,'0')}` : 'Token expired — swap token to continue.';
+    if (secsLeft === 0) { clearInterval(window._expiryInterval); showExpireWarning(); }
   }, 1000);
+}
+
+// ─── Sign out ─────────────────────────────────────────────────────────────
+// ─── Sign out ─────────────────────────────────────────────────────────────
+// ─── Sign out ─────────────────────────────────────────────────────────────
+function signOut() {
+  accessToken = null;
+  tokenExpiresAt = 0;
+  clearTimeout(tokenExpireTimer);
+  clearInterval(window._expiryInterval);
+  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active','done');
+  document.getElementById('step-1').classList.add('active');
+  addLog('Disconnected.', '');
 }
 
 // ─── Step navigation ─────────────────────────────────────────────────────
@@ -1798,7 +1775,6 @@ function stopWriting() {
 
 // ─── Init ─────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
-  initGIS();
   checkForRestore();
 });
 </script>
