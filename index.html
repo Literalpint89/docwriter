@@ -1070,7 +1070,7 @@ async function pasteFromClipboard() {
       document.getElementById('manual-token').value = text;
       showTokenStatus('Token pasted from clipboard.', 'success');
     } else {
-      showTokenStatus('Clipboard doesn't contain a valid token (should start with ya29.).', 'error');
+      showTokenStatus("Clipboard does not contain a valid token (should start with ya29.).", "error");
     }
   } catch(e) {
     showTokenStatus('Clipboard access denied — please paste manually.', 'error');
@@ -1088,8 +1088,8 @@ function showTokenStatus(msg, type) {
 function handleManualToken() {
   const token = document.getElementById('manual-token').value.trim();
   if (!token) { alert('Please paste your access token.'); return; }
-  if (!token.startsWith('ya29.')) {
-    showTokenStatus('This doesn't look like a valid token — it should start with ya29.', 'error');
+  if (!token.startsWith("ya29.")) {
+    showTokenStatus("This doesn't look like a valid token — it should start with ya29.", "error");
     return;
   }
   accessToken    = token;
