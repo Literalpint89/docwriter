@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>DocWriter — Human Typing Simulator</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&display=swap" rel="stylesheet"/>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="initGIS()"></script>
 <style>
   :root {
     --bg: #0e0e0e;
@@ -1052,137 +1052,103 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ─── OAuth config ────────────────────────────────────────────────────────
+// ─── Google Identity Services (GIS) token client ─────────────────────────
+// GIS uses a popup — no redirect, no backend, no client secret needed.
+// This is Google's official recommended approach for SPAs.
 const OAUTH_CLIENT_ID = '124821601232-ntdtj2ljs26jroph9gncd9doq8kk3h26.apps.googleusercontent.com';
-const OAUTH_REDIRECT   = 'https://literalpint89.github.io/docwriter';
-const OAUTH_SCOPES     = 'https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive';
+const OAUTH_SCOPES    = 'https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive';
 
 let tokenExpiresAt    = 0;
 let tokenRefreshTimer = null;
+let gisClient         = null;
 
-// ─── Start OAuth implicit flow ────────────────────────────────────────────
-// Implicit flow returns the access token directly in the URL hash —
-// no code exchange, no client secret needed. Works perfectly for
-// static GitHub Pages apps.
-function startOAuth() {
-  const params = new URLSearchParams({
-    client_id:     OAUTH_CLIENT_ID,
-    redirect_uri:  OAUTH_REDIRECT,
-    response_type: 'token',
-    scope:         OAUTH_SCOPES,
-    prompt:        'consent',
+function initGIS() {
+  if (!window.google) {
+    setTimeout(initGIS, 200);
+    return;
+  }
+  gisClient = google.accounts.oauth2.initTokenClient({
+    client_id: OAUTH_CLIENT_ID,
+    scope:     OAUTH_SCOPES,
+    callback:  onTokenResponse,
   });
-  window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
+  // Try restore from sessionStorage
+  tryRestoreSession();
 }
 
-// ─── Handle redirect back — token is in URL hash ──────────────────────────
-function handleOAuthRedirect() {
-  const hash   = window.location.hash.substring(1);
-  const params = new URLSearchParams(hash);
-  const token  = params.get('access_token');
-  const expiresIn = parseInt(params.get('expires_in') || '3600');
-  const error  = params.get('error');
-
-  if (error) { addLog('Sign-in error: ' + error, 'error'); return false; }
-  if (!token) return false;
-
-  // Clean URL immediately — remove hash so token not visible in address bar
-  window.history.replaceState({}, '', window.location.pathname);
-
-  accessToken    = token;
+function onTokenResponse(resp) {
+  if (resp.error) {
+    addLog('Sign-in error: ' + resp.error, 'error');
+    return;
+  }
+  accessToken    = resp.access_token;
+  const expiresIn = parseInt(resp.expires_in || 3600);
   tokenExpiresAt = Date.now() + (expiresIn - 60) * 1000;
 
-  // Save to sessionStorage so page refresh within same tab restores session
   try {
-    sessionStorage.setItem('dw_access_token', token);
+    sessionStorage.setItem('dw_access_token', accessToken);
     sessionStorage.setItem('dw_token_expires', String(tokenExpiresAt));
   } catch(e) {}
 
-  // Schedule re-auth prompt before expiry
+  // Schedule silent refresh
   clearTimeout(tokenRefreshTimer);
   tokenRefreshTimer = setTimeout(() => {
-    addLog('Token expiring soon — refreshing...', 'highlight');
-    silentRefresh();
+    addLog('Refreshing token...', '');
+    gisClient.requestAccessToken({ prompt: '' });
   }, (expiresIn - 120) * 1000);
 
-  showSignedIn(expiresIn);
+  showSignedIn();
+  startExpiryCountdown();
   markDone(1);
   goToStep(2);
   document.getElementById('progress-panel').style.display = 'block';
-  addLog('Signed in successfully. Token auto-refreshes in the background.', 'success');
-  return true;
+  addLog('Signed in. Token auto-refreshes silently — no manual steps needed.', 'success');
 }
 
-// ─── Silent refresh via hidden iframe ────────────────────────────────────
-// Opens a hidden iframe to re-run the OAuth flow silently using the
-// existing Google session — user sees nothing, token is renewed.
-function silentRefresh() {
-  const params = new URLSearchParams({
-    client_id:     OAUTH_CLIENT_ID,
-    redirect_uri:  OAUTH_REDIRECT,
-    response_type: 'token',
-    scope:         OAUTH_SCOPES,
-    prompt:        'none',
-  });
-
-  const iframe = document.createElement('iframe');
-  iframe.style.display = 'none';
-  iframe.src = 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
-  document.body.appendChild(iframe);
-
-  const timer = setTimeout(() => {
-    iframe.remove();
-    addLog('Silent refresh timed out — will retry on next expiry.', '');
-  }, 10000);
-
-  iframe.onload = () => {
-    try {
-      const hash = new URLSearchParams(iframe.contentWindow.location.hash.substring(1));
-      const token = hash.get('access_token');
-      const expiresIn = parseInt(hash.get('expires_in') || '3600');
-      if (token) {
-        accessToken    = token;
-        tokenExpiresAt = Date.now() + (expiresIn - 60) * 1000;
-        clearTimeout(timer);
-        iframe.remove();
-        addLog('Token refreshed silently.', 'success');
-        startExpiryCountdown();
-        // Schedule next refresh
-        clearTimeout(tokenRefreshTimer);
-        tokenRefreshTimer = setTimeout(silentRefresh, (expiresIn - 120) * 1000);
-      }
-    } catch(e) {
-      // Cross-origin — Google session expired, user needs to sign in again
-      clearTimeout(timer);
-      iframe.remove();
-      addLog('Session expired — please sign in again.', 'error');
-      showSignedOut();
-    }
-  };
+function startOAuth() {
+  if (!gisClient) { addLog('Auth not ready yet — please wait a moment.', 'error'); return; }
+  gisClient.requestAccessToken({ prompt: 'consent' });
 }
 
+function tryRestoreSession() {
+  try {
+    const token   = sessionStorage.getItem('dw_access_token');
+    const expires = parseInt(sessionStorage.getItem('dw_token_expires') || '0');
+    if (!token || Date.now() > expires) return false;
+    accessToken    = token;
+    tokenExpiresAt = expires;
+    showSignedIn();
+    startExpiryCountdown();
+    markDone(1);
+    goToStep(2);
+    document.getElementById('progress-panel').style.display = 'block';
+    addLog('Session restored automatically.', 'success');
+    return true;
+  } catch(e) { return false; }
+}
+
+// ─── Sign out ─────────────────────────────────────────────────────────────
 // ─── Sign out ─────────────────────────────────────────────────────────────
 function signOut() {
   accessToken = null;
   tokenExpiresAt = 0;
   clearTimeout(tokenRefreshTimer);
   clearInterval(window._expiryInterval);
-  showSignedOut();
-  addLog('Signed out.', '');
-}
-
-function showSignedOut() {
+  try {
+    sessionStorage.removeItem('dw_access_token');
+    sessionStorage.removeItem('dw_token_expires');
+  } catch(e) {}
+  if (window.google) google.accounts.oauth2.revoke(accessToken, () => {});
   document.getElementById('auth-signed-in').style.display = 'none';
   document.getElementById('auth-signed-out').style.display = 'block';
   for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active','done');
   document.getElementById('step-1').classList.add('active');
+  addLog('Signed out.', '');
 }
 
-// ─── Auth UI helpers ──────────────────────────────────────────────────────
-function showSignedIn(expiresIn) {
+function showSignedIn() {
   document.getElementById('auth-signed-out').style.display = 'none';
   document.getElementById('auth-signed-in').style.display = 'block';
-  startExpiryCountdown();
 }
 
 function startExpiryCountdown() {
@@ -1196,26 +1162,6 @@ function startExpiryCountdown() {
       : 'Refreshing token...';
     if (secsLeft === 0) clearInterval(window._expiryInterval);
   }, 1000);
-}
-
-// ─── Try restore from sessionStorage ─────────────────────────────────────
-// Implicit flow tokens can't be stored long-term (no refresh token),
-// but we keep the current token in sessionStorage so page refreshes
-// within the same tab don't require re-auth.
-function tryRestoreSession() {
-  try {
-    const token   = sessionStorage.getItem('dw_access_token');
-    const expires = parseInt(sessionStorage.getItem('dw_token_expires') || '0');
-    if (!token || Date.now() > expires) return false;
-    accessToken    = token;
-    tokenExpiresAt = expires;
-    showSignedIn();
-    markDone(1);
-    goToStep(2);
-    document.getElementById('progress-panel').style.display = 'block';
-    addLog('Session restored.', 'success');
-    return true;
-  } catch(e) { return false; }
 }
 
 // ─── Step navigation ─────────────────────────────────────────────────────
@@ -1852,13 +1798,7 @@ function stopWriting() {
 
 // ─── Init ─────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
-  // Handle redirect back from Google — token is in URL hash
-  if (window.location.hash.includes('access_token=')) {
-    handleOAuthRedirect();
-  } else {
-    // Try restore from sessionStorage (same tab refresh)
-    tryRestoreSession();
-  }
+  initGIS();
   checkForRestore();
 });
 </script>
