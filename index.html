@@ -824,32 +824,41 @@
 </div>
 
 <script>
-// ─── State ───────────────────────────────────────────────────────────────────
-let accessToken = null;
-let docId = null;
-let isPaused = false;
-let isStopped = false;
-let saveCount = 0;
-let charCount = 0;
-let sessionStart = null;
-let totalDurationMs = 0;
-let writeTimer = null;
-let speedMultiplier = 1.0;
+// ─── State ────────────────────────────────────────────────────────────────────
+let accessToken       = null;
+let docId             = null;
+let isPaused          = false;
+let isStopped         = false;
+let saveCount         = 0;
+let charCount         = 0;
+let sessionStart      = null;
+let totalDurationMs   = 0;
+let writeTimer        = null;
+let speedMultiplier   = 1.0;
 let manualAdvancePending = false;
-let sessionQueue = [];
+let sessionQueue      = [];
 let currentQueueIndex = 0;
+let tokenExpiresAt    = 0;
+let tokenExpireTimer  = null;
+let isOffline         = false;
+let rateLimitUntil    = 0;
+let consecutiveErrors = 0;
+let totalChars        = 0;
+let timerInterval     = null;
+let effectiveElapsed  = 0;
+let lastTimerTick     = null;
+let paceMultiplier    = 1.0;
 
-// ─── Session queue ────────────────────────────────────────────────────────
+// ─── Queue ────────────────────────────────────────────────────────────────────
 function addToQueue() {
-  const content = document.getElementById('content').value.trim();
-  const label = document.getElementById('session-label').value.trim();
-  const docMode = document.getElementById('doc-mode').value;
-  const docTitle = document.getElementById('doc-title').value.trim() || 'My Document';
+  const content    = document.getElementById('content').value.trim();
+  const label      = document.getElementById('session-label').value.trim();
+  const docMode    = document.getElementById('doc-mode').value;
+  const docTitle   = document.getElementById('doc-title').value.trim() || 'My Document';
   const existingId = document.getElementById('existing-doc-id').value.trim();
   if (!content) { alert('Paste some content first.'); return; }
-  const words = content.trim().split(/\s+/).length;
-  const entry = { content, label: label || `Section ${sessionQueue.length + 1}`, docMode, docTitle, existingId, words };
-  sessionQueue.push(entry);
+  const words = content.split(/\s+/).filter(Boolean).length;
+  sessionQueue.push({ content, label: label || `Section ${sessionQueue.length + 1}`, docMode, docTitle, existingId, words });
   renderQueue();
   document.getElementById('content').value = '';
   document.getElementById('session-label').value = '';
@@ -860,368 +869,61 @@ function renderQueue() {
   const list = document.getElementById('queue-list');
   list.innerHTML = '';
   sessionQueue.forEach((item, i) => {
-    const el = document.createElement('div');
-    el.className = 'queue-item' + (i === currentQueueIndex ? ' active-q' : '') + (i < currentQueueIndex ? ' done-q' : '');
-    const numEl = document.createElement('span'); numEl.className = 'q-num'; numEl.textContent = i + 1;
-    const lblEl = document.createElement('span'); lblEl.className = 'q-label'; lblEl.textContent = item.label;
-    const wrdEl = document.createElement('span'); wrdEl.className = 'q-words'; wrdEl.textContent = item.words + 'w';
-    el.appendChild(numEl); el.appendChild(lblEl); el.appendChild(wrdEl);
+    const el    = document.createElement('div');
+    el.className = 'queue-item' +
+      (i === currentQueueIndex ? ' active-q' : '') +
+      (i < currentQueueIndex  ? ' done-q'   : '');
+    const num   = document.createElement('span'); num.className   = 'q-num';   num.textContent   = i + 1;
+    const lbl   = document.createElement('span'); lbl.className   = 'q-label'; lbl.textContent   = item.label;
+    const words = document.createElement('span'); words.className = 'q-words'; words.textContent = item.words + 'w';
+    el.append(num, lbl, words);
     list.appendChild(el);
   });
 }
 
-// ─── Session templates ────────────────────────────────────────────────────
+// ─── Templates ────────────────────────────────────────────────────────────────
 function applyTemplate(tpl) {
-  const dur = document.getElementById('duration');
-  const style = document.getElementById('style');
-  const typo = document.getElementById('typo-rate');
-  if (tpl === 'essay')    { dur.value = '120'; style.value = 'steady'; typo.value = 'low'; }
-  if (tpl === 'report')   { dur.value = '240'; style.value = 'slow';   typo.value = 'low'; }
-  if (tpl === 'quick')    { dur.value = '30';  style.value = 'burst';  typo.value = 'medium'; }
-  if (tpl === 'longform') { dur.value = '360'; style.value = 'steady'; typo.value = 'low'; }
+  const map = {
+    essay:    { duration: '120', style: 'steady', typoRate: 'low'    },
+    report:   { duration: '240', style: 'slow',   typoRate: 'low'    },
+    quick:    { duration: '30',  style: 'burst',  typoRate: 'medium' },
+    longform: { duration: '360', style: 'steady', typoRate: 'low'    },
+  };
+  const t = map[tpl]; if (!t) return;
+  document.getElementById('duration').value   = t.duration;
+  document.getElementById('style').value      = t.style;
+  document.getElementById('typo-rate').value  = t.typoRate;
 }
 
-// ─── Speed multiplier ─────────────────────────────────────────────────────
+// ─── Speed ────────────────────────────────────────────────────────────────────
 function updateSpeedMultiplier(val) {
   speedMultiplier = 100 / parseInt(val);
   const display = (parseInt(val) / 100).toFixed(2).replace(/\.?0+$/, '');
   document.getElementById('speed-val').textContent = display + '×';
 }
 
-// ─── Token swap ───────────────────────────────────────────────────────────
-function showTokenSwap() {
-  document.getElementById('token-swap-bar').classList.add('visible');
-}
-function hideTokenSwap() {
-  document.getElementById('token-swap-bar').classList.remove('visible');
-}
-function swapToken() {
-  const t = document.getElementById('swap-token-input').value.trim();
-  if (!t) { alert('Paste a token first.'); return; }
-  accessToken = t;
-  hideTokenSwap();
-  addLog('Token swapped. Session will continue.', 'success');
-  if (isPaused) { togglePause(); }
-}
-
-// ─── Manual advance ───────────────────────────────────────────────────────
-function manualAdvance() {
-  if (!isPaused) return;
-  manualAdvancePending = true;
-}
-
-// ─── Pre-flight checklist ─────────────────────────────────────────────────
-async function runPreflight() {
-  // Hard requirements — block if these fail
-  if (!accessToken) { alert('No token — go back to Step 1 and connect first.'); return; }
-  const content = document.getElementById('content').value.trim();
-  if (!content) { alert('No content — go back to Step 2 and paste your text.'); return; }
-
-  const pf = document.getElementById('preflight');
-  pf.classList.add('visible');
-  const oldBtn = document.getElementById('pf-proceed-btn');
-  if (oldBtn) oldBtn.remove();
-
-  const setItem = (id, state, text) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.className = 'preflight-item ' + state;
-    el.textContent = (state === 'ok' ? '✓' : state === 'fail' ? '✗' : state === 'warn' ? '⚠' : '◌') + ' ' + text;
-  };
-
-  setItem('pf-token', 'checking', 'Token — checking...');
-  setItem('pf-content', 'ok', `Content — ${content.split(/\s+/).length} words ready`);
-  setItem('pf-doc', 'checking', 'Document — checking...');
-
-  // Token check — non-blocking, just informational
-  try {
-    const tokenTest = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
-    const tokenData = await tokenTest.json();
-    if (tokenData.error) {
-      setItem('pf-token', 'warn', 'Token — may be expired. Swap if writes fail.');
-    } else {
-      const minsLeft = Math.floor(parseInt(tokenData.expires_in || 0) / 60);
-      setItem('pf-token', 'ok', `Token — valid (${minsLeft} min remaining)`);
-    }
-  } catch(e) {
-    setItem('pf-token', 'ok', 'Token — present');
-  }
-
-  // Doc check — non-blocking
-  const mode = document.getElementById('doc-mode').value;
-  if (mode === 'new') {
-    setItem('pf-doc', 'ok', 'Document — new doc will be created on start');
-  } else {
-    const input = document.getElementById('existing-doc-id').value.trim();
-    if (!input) {
-      setItem('pf-doc', 'warn', 'No doc URL entered — writing will fail. Go back and paste your doc URL.');
-    } else {
-      try {
-        const testId = extractDocId(input);
-        const res = await fetch(`https://docs.googleapis.com/v1/documents/${testId}`, {
-          headers: { 'Authorization': `Bearer ${accessToken}` }
-        });
-        if (res.ok) {
-          const doc = await res.json();
-          setItem('pf-doc', 'ok', `Document — "${doc.title || testId}" accessible`);
-        } else {
-          setItem('pf-doc', 'warn', `Document — server returned ${res.status}. Will try anyway.`);
-        }
-      } catch(e) {
-        setItem('pf-doc', 'warn', 'Document — could not verify. Will try anyway.');
-      }
-    }
-  }
-
-  await new Promise(r => setTimeout(r, 500));
-  pf.classList.remove('visible');
-  startWriting();
-}
-
-function addProceedAnyway(pf) {
-  // Add a "proceed anyway" button below the checklist for warnings (not hard failures)
-  const btn = document.createElement('button');
-  btn.id = 'pf-proceed-btn';
-  btn.className = 'btn btn-ghost';
-  btn.style.cssText = 'margin-top:12px;font-size:11px;padding:7px 14px;';
-  btn.textContent = 'Proceed anyway →';
-  btn.onclick = () => { pf.classList.remove('visible'); btn.remove(); startWriting(); };
-  pf.appendChild(btn);
-}
-
-// ─── Session reset (Write another section) ────────────────────────────────
-function resetToStep2() {
-  // Keep token and docId, return to step 2 for more content
-  document.getElementById('content').value = '';
-  document.getElementById('session-label').value = '';
-  document.getElementById('doc-mode').value = 'existing';
-  toggleDocMode();
-  if (docId) {
-    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${docId}/edit`;
-  }
-  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
-  document.getElementById('step-1').classList.add('done');
-  document.getElementById('step-2').classList.add('active');
-  addLog('Ready for next section. Token and doc preserved.', 'highlight');
-}
-
-function startNewSession() {
-  // Full reset — keep token only
-  docId = null;
-  document.getElementById('content').value = '';
-  document.getElementById('session-label').value = '';
-  document.getElementById('doc-title').value = '';
-  document.getElementById('existing-doc-id').value = '';
-  document.getElementById('doc-mode').value = 'new';
-  toggleDocMode();
-  sessionQueue = [];
-  currentQueueIndex = 0;
-  document.getElementById('queue-section').style.display = 'none';
-  document.getElementById('queue-list').innerHTML = '';
-  document.getElementById('doc-link-card').classList.remove('visible');
-  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
-  document.getElementById('step-1').classList.add('done');
-  document.getElementById('step-2').classList.add('active');
-  addLog('New session started. Token preserved.', 'highlight');
-}
-
-// ─── Crash restore ────────────────────────────────────────────────────────
-function saveCheckpoint(wordIndex, wordObjs, settings) {
-  try {
-    const data = JSON.stringify({ wordIndex, wordObjs, settings, docId, ts: Date.now() });
-    if (data.length > 4 * 1024 * 1024) { // warn if approaching 5MB limit
-      addLog('Checkpoint too large to save — crash restore unavailable for this session.', '');
-      return;
-    }
-    localStorage.setItem('dw_checkpoint', data);
-  } catch(e) {
-    addLog('Checkpoint save failed (' + e.message + ') — crash restore unavailable.', '');
-  }
-}
-
-function clearCheckpoint() {
-  try { localStorage.removeItem('dw_checkpoint'); } catch(e) {}
-}
-
-function checkForRestore() {
-  try {
-    const raw = localStorage.getItem('dw_checkpoint');
-    if (!raw) return;
-    const cp = JSON.parse(raw);
-    if (Date.now() - cp.ts > 24 * 60 * 60 * 1000) { clearCheckpoint(); return; }
-    window._pendingRestore = cp;
-    document.getElementById('restore-banner').classList.add('visible');
-  } catch(e) {}
-}
-
-function restoreSession() {
-  const cp = window._pendingRestore;
-  if (!cp) return;
-  document.getElementById('restore-banner').classList.remove('visible');
-  if (cp.settings) {
-    document.getElementById('duration').value = cp.settings.duration || '30';
-    document.getElementById('style').value = cp.settings.style || 'burst';
-    document.getElementById('typo-rate').value = cp.settings.typoRate || 'low';
-  }
-  if (cp.docId) {
-    docId = cp.docId;
-    document.getElementById('doc-mode').value = 'existing';
-    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${cp.docId}/edit`;
-    toggleDocMode();
-  }
-  addLog('Restored checkpoint. Click Start writing to resume.', 'highlight');
-  window._restoreWordIndex = cp.wordIndex;
-  window._restoreWordObjs = cp.wordObjs;
-}
-
-function clearRestore() {
-  clearCheckpoint();
-  document.getElementById('restore-banner').classList.remove('visible');
-  window._pendingRestore = null;
-}
-
-// ─── Focus window lock ────────────────────────────────────────────────────
-window.addEventListener('beforeunload', (e) => {
-  if (!isStopped && sessionStart && charCount > 0) {
-    e.preventDefault();
-    e.returnValue = 'A writing session is in progress. Leave and lose progress?';
-  }
-});
-
-// ─── Spacebar pause/resume ────────────────────────────────────────────────
-document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
-    if (sessionStart && !isStopped) {
-      e.preventDefault();
-      togglePause();
-    }
-  }
-});
-
-// ─── Auth & token management ─────────────────────────────────────────────
-let tokenExpiresAt   = 0;
-let tokenExpireTimer = null;
-let isOffline        = false;
-let rateLimitUntil   = 0;
-let consecutiveErrors = 0;
-
-// ─── 1. OAuth Playground deep link ───────────────────────────────────────
-function openOAuthPlayground() {
-  window.open('https://developers.google.com/oauthplayground/#step1=https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/drive&url=https://&content_type=application/json&http_method=GET&useDefaultOauthCred=unchecked&oauthEndpointSelect=Google&oauthAuthEndpointValue=https://accounts.google.com/o/oauth2/auth&oauthTokenEndpointValue=https://oauth2.googleapis.com/token&includeCredentials=unchecked&accessTokenType=bearer&autoRefreshToken=unchecked&accessType=offline&forceAprovalPrompt=checked&response_type=code', '_blank');
-}
-
-// ─── 2. Paste from clipboard ──────────────────────────────────────────────
-async function pasteFromClipboard() {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (text && text.startsWith('ya29.')) {
-      document.getElementById('manual-token').value = text;
-      showTokenStatus('Token pasted from clipboard.', 'success');
-    } else {
-      showTokenStatus('Clipboard does not contain a valid token (should start with ya29.).', 'error');
-    }
-  } catch(e) {
-    showTokenStatus('Clipboard access denied — please paste manually.', 'error');
-  }
-}
-
-function showTokenStatus(msg, type) {
-  const el = document.getElementById('token-status');
-  el.style.display = 'block';
-  el.style.background = type === 'success' ? 'rgba(74,240,160,0.08)' : 'rgba(240,74,74,0.08)';
-  el.style.color = type === 'success' ? 'var(--success)' : 'var(--danger)';
-  el.textContent = msg;
-}
-
-// ─── 3. Token masked display ──────────────────────────────────────────────
-function maskToken(token) {
-  if (!token || token.length < 8) return '****';
-  return '****...' + token.slice(-6);
-}
-
+// ─── Auth UI helpers ──────────────────────────────────────────────────────────
 function updateAuthDots(state) {
   ['auth-dot', 'panel-auth-dot'].forEach(id => {
     const el = document.getElementById(id);
-    if (!el) return;
-    el.className = 'auth-status-dot ' + state;
+    if (el) el.className = 'auth-status-dot ' + (state || '');
   });
 }
 
-// ─── 4. Handle manual token + scope validator ─────────────────────────────
-function handleManualToken() {
-  const token = document.getElementById('manual-token').value.trim();
-  if (!token) { alert('Please paste your access token.'); return; }
-  if (!token.startsWith('ya29.')) {
-    showTokenStatus('This does not look like a valid token — it should start with ya29.', 'error');
-    updateAuthDots('red');
-    return;
-  }
-  accessToken    = token;
-  tokenExpiresAt = Date.now() + (55 * 60 * 1000);
-
-  // Update masked display
-  document.getElementById('auth-masked').textContent = maskToken(token);
-  document.getElementById('panel-auth-token').textContent = maskToken(token);
-  updateAuthDots('amber');
-
-  // Validate scopes before proceeding
-  validateTokenScopes(token).then(valid => {
-    if (valid) {
-      updateAuthDots('green');
-      showTokenStatus('Token valid — Docs and Drive scopes confirmed.', 'success');
-    } else {
-      updateAuthDots('amber');
-      showTokenStatus('Token accepted but could not confirm scopes — proceed with caution.', 'error');
-    }
-  });
-
-  startTokenExpireWarning();
-  markDone(1);
-  goToStep(2);
-  document.getElementById('progress-panel').style.display = 'block';
-  addLog('Token connected (' + maskToken(token) + '). Valid ~1 hour — app warns before expiry.', 'success');
+function updateAuthBar(state) {
+  const bar = document.getElementById('auth-bar');
+  if (bar) bar.className = 'auth-bar' + (state ? ' ' + state : '');
 }
 
-// ─── 5. Scope validator ───────────────────────────────────────────────────
-async function validateTokenScopes(token) {
-  try {
-    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + token);
-    const data = await res.json();
-    if (data.error) return false;
-    const scope = data.scope || '';
-    const hasDoc   = scope.includes('documents') || scope.includes('docs');
-    const hasDrive = scope.includes('drive');
-    return hasDoc; // drive is optional for basic use
-  } catch(e) { return false; }
+function maskToken(t) {
+  if (!t || t.length < 8) return '****';
+  return '****...' + t.slice(-6);
 }
 
-// ─── 6. Token health check ping ───────────────────────────────────────────
-async function pingTokenHealth() {
-  if (!accessToken) { showTokenStatus('No token loaded yet.', 'error'); return; }
-  showTokenStatus('Pinging token...', 'success');
-  try {
-    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
-    const data = await res.json();
-    if (data.error) {
-      showTokenStatus('Token is invalid or expired: ' + data.error, 'error');
-      updateAuthDots('red');
-    } else {
-      const secs = parseInt(data.expires_in || 0);
-      const m = Math.floor(secs / 60), s = secs % 60;
-      showTokenStatus('Token is valid — ' + m + ':' + String(s).padStart(2,'0') + ' remaining.', 'success');
-      updateAuthDots('green');
-      tokenExpiresAt = Date.now() + (secs - 60) * 1000;
-      startTokenExpireWarning();
-    }
-  } catch(e) {
-    showTokenStatus('Ping failed: ' + e.message, 'error');
-  }
-}
-
-// ─── 7. Token expiry countdown + warnings ─────────────────────────────────
+// ─── Token expiry ─────────────────────────────────────────────────────────────
 function startTokenExpireWarning() {
   clearTimeout(tokenExpireTimer);
-  const warnIn = tokenExpiresAt - Date.now() - (5 * 60 * 1000); // warn at 5 min
+  const warnIn = tokenExpiresAt - Date.now() - 5 * 60 * 1000;
   if (warnIn > 0) tokenExpireTimer = setTimeout(showExpireWarning, warnIn);
   startExpiryCountdown();
 }
@@ -1241,10 +943,12 @@ function startExpiryCountdown() {
     const timeStr = m + ':' + String(s).padStart(2, '0');
 
     const el = document.getElementById('auth-expiry-display');
-    if (el) el.textContent = secsLeft > 0 ? 'Token expires in ' + timeStr : 'Token expired — swap to continue.';
+    if (el) el.textContent = secsLeft > 0
+      ? 'Token expires in ' + timeStr
+      : 'Token expired — swap to continue.';
 
-    const panelTime = document.getElementById('panel-auth-time');
-    if (panelTime) panelTime.textContent = secsLeft > 0 ? timeStr + ' left' : 'Expired';
+    const pt = document.getElementById('panel-auth-time');
+    if (pt) pt.textContent = secsLeft > 0 ? timeStr + ' left' : 'Expired';
 
     if (secsLeft === 0) {
       clearInterval(window._expiryInterval);
@@ -1253,33 +957,150 @@ function startExpiryCountdown() {
       if (sessionStart && !isStopped && !isPaused) {
         addLog('Token expired — session auto-paused. Swap token to resume.', 'error');
         isPaused = true;
-        document.getElementById('pause-btn').textContent = 'Resume';
-        document.getElementById('status-badge').textContent = 'Paused';
-        document.getElementById('status-badge').className = 'status-badge paused';
+        document.getElementById('pause-btn').textContent        = 'Resume';
+        document.getElementById('status-badge').textContent     = 'Paused';
+        document.getElementById('status-badge').className       = 'status-badge paused';
         document.getElementById('token-swap-bar').classList.add('visible');
       }
     }
   }, 1000);
 }
 
-function updateAuthBar(state) {
-  const bar = document.getElementById('auth-bar');
-  if (!bar) return;
-  bar.className = 'auth-bar' + (state ? ' ' + state : '');
+// ─── OAuth playground ─────────────────────────────────────────────────────────
+function openOAuthPlayground() {
+  window.open(
+    'https://developers.google.com/oauthplayground/#step1=https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/drive&url=https://&content_type=application/json&http_method=GET&useDefaultOauthCred=unchecked&oauthEndpointSelect=Google&oauthAuthEndpointValue=https://accounts.google.com/o/oauth2/auth&oauthTokenEndpointValue=https://oauth2.googleapis.com/token&includeCredentials=unchecked&accessTokenType=bearer&autoRefreshToken=unchecked&accessType=offline&forceAprovalPrompt=checked&response_type=code',
+    '_blank'
+  );
 }
 
-// ─── 8. Swap token mid-session ────────────────────────────────────────────
+// ─── Clipboard paste ──────────────────────────────────────────────────────────
+async function pasteFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text && text.startsWith('ya29.')) {
+      document.getElementById('manual-token').value = text;
+      showTokenStatus('Token pasted from clipboard.', 'success');
+    } else {
+      showTokenStatus('Clipboard does not contain a valid token (should start with ya29.).', 'error');
+    }
+  } catch(e) {
+    showTokenStatus('Clipboard access denied — please paste manually.', 'error');
+  }
+}
 
-// ─── 9. Offline detection ─────────────────────────────────────────────────
+function showTokenStatus(msg, type) {
+  const el = document.getElementById('token-status');
+  el.style.display    = 'block';
+  el.style.background = type === 'success' ? 'rgba(74,240,160,0.08)' : 'rgba(240,74,74,0.08)';
+  el.style.color      = type === 'success' ? 'var(--success)' : 'var(--danger)';
+  el.textContent      = msg;
+}
+
+// ─── Connect token ────────────────────────────────────────────────────────────
+function handleManualToken() {
+  const token = document.getElementById('manual-token').value.trim();
+  if (!token) { alert('Please paste your access token.'); return; }
+  if (!token.startsWith('ya29.')) {
+    showTokenStatus('This does not look like a valid token — it should start with ya29.', 'error');
+    updateAuthDots('red');
+    return;
+  }
+  accessToken    = token;
+  tokenExpiresAt = Date.now() + 55 * 60 * 1000;
+
+  document.getElementById('auth-masked').textContent      = maskToken(token);
+  document.getElementById('panel-auth-token').textContent = maskToken(token);
+  updateAuthDots('amber');
+
+  validateTokenScopes(token).then(valid => {
+    updateAuthDots(valid ? 'green' : 'amber');
+    showTokenStatus(
+      valid
+        ? 'Token valid — Docs and Drive scopes confirmed.'
+        : 'Token accepted but could not confirm scopes — proceed with caution.',
+      valid ? 'success' : 'error'
+    );
+  });
+
+  startTokenExpireWarning();
+  markDone(1);
+  goToStep(2);
+  document.getElementById('progress-panel').style.display = 'block';
+  addLog('Token connected (' + maskToken(token) + '). Valid ~1 hour — app warns before expiry.', 'success');
+}
+
+async function validateTokenScopes(token) {
+  try {
+    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + token);
+    const data = await res.json();
+    if (data.error) return false;
+    const scope = data.scope || '';
+    return scope.includes('documents') || scope.includes('docs');
+  } catch(e) { return false; }
+}
+
+// ─── Ping token ───────────────────────────────────────────────────────────────
+async function pingTokenHealth() {
+  if (!accessToken) { showTokenStatus('No token loaded yet.', 'error'); return; }
+  showTokenStatus('Pinging token...', 'success');
+  try {
+    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
+    const data = await res.json();
+    if (data.error) {
+      showTokenStatus('Token is invalid or expired: ' + data.error, 'error');
+      updateAuthDots('red');
+    } else {
+      const secs = parseInt(data.expires_in || 0);
+      const m = Math.floor(secs / 60), s = secs % 60;
+      showTokenStatus('Token valid — ' + m + ':' + String(s).padStart(2,'0') + ' remaining.', 'success');
+      updateAuthDots('green');
+      tokenExpiresAt = Date.now() + (secs - 60) * 1000;
+      startTokenExpireWarning();
+    }
+  } catch(e) {
+    showTokenStatus('Ping failed: ' + e.message, 'error');
+  }
+}
+
+// ─── Token swap ───────────────────────────────────────────────────────────────
+function showTokenSwap() { document.getElementById('token-swap-bar').classList.add('visible'); }
+function hideTokenSwap() { document.getElementById('token-swap-bar').classList.remove('visible'); }
+
+function swapToken() {
+  const t = document.getElementById('swap-token-input').value.trim();
+  if (!t) { alert('Paste a token first.'); return; }
+  if (!t.startsWith('ya29.')) { addLog('Invalid token format.', 'error'); return; }
+  accessToken    = t;
+  tokenExpiresAt = Date.now() + 55 * 60 * 1000;
+  document.getElementById('auth-masked').textContent      = maskToken(t);
+  document.getElementById('panel-auth-token').textContent = maskToken(t);
+  document.getElementById('swap-token-input').value = '';
+  hideTokenSwap();
+  updateAuthDots('green');
+  updateAuthBar('');
+  startTokenExpireWarning();
+  consecutiveErrors = 0;
+  addLog('Token swapped (' + maskToken(t) + '). Session continuing.', 'success');
+  if (isPaused && sessionStart) togglePause();
+}
+
+// ─── Manual advance ───────────────────────────────────────────────────────────
+function manualAdvance() {
+  if (!isPaused) return;
+  manualAdvancePending = true;
+}
+
+// ─── Offline detection ────────────────────────────────────────────────────────
 function initOfflineDetection() {
   window.addEventListener('offline', () => {
     isOffline = true;
     document.getElementById('offline-banner').classList.add('visible');
     if (sessionStart && !isStopped && !isPaused) {
       isPaused = true;
-      document.getElementById('pause-btn').textContent = 'Resume';
+      document.getElementById('pause-btn').textContent    = 'Resume';
       document.getElementById('status-badge').textContent = 'Offline';
-      document.getElementById('status-badge').className = 'status-badge paused';
+      document.getElementById('status-badge').className   = 'status-badge paused';
       addLog('Network lost — session paused.', 'error');
     }
   });
@@ -1290,14 +1111,11 @@ function initOfflineDetection() {
   });
 }
 
-// ─── 10. API call wrapper with 401/429 handling ───────────────────────────
-// Wraps fetch with auth error detection, rate limit backoff,
-// and consecutive error tracking.
+// ─── authFetch — 401 / 429 handling ──────────────────────────────────────────
 async function authFetch(url, options = {}) {
-  // Check rate limit backoff
   if (Date.now() < rateLimitUntil) {
     const wait = rateLimitUntil - Date.now();
-    addLog('Rate limited — waiting ' + Math.round(wait/1000) + 's...', '');
+    addLog('Rate limited — waiting ' + Math.round(wait / 1000) + 's...', '');
     await new Promise(r => setTimeout(r, wait));
   }
 
@@ -1310,23 +1128,21 @@ async function authFetch(url, options = {}) {
     }
   });
 
-  // 401 — token expired or invalid
   if (res.status === 401) {
     consecutiveErrors++;
     updateAuthDots('red');
     updateAuthBar('expired');
     if (sessionStart && !isStopped && !isPaused) {
       isPaused = true;
-      document.getElementById('pause-btn').textContent = 'Resume';
+      document.getElementById('pause-btn').textContent    = 'Resume';
       document.getElementById('status-badge').textContent = 'Paused';
-      document.getElementById('status-badge').className = 'status-badge paused';
+      document.getElementById('status-badge').className   = 'status-badge paused';
       document.getElementById('token-swap-bar').classList.add('visible');
       addLog('Token rejected (401) — session paused. Swap token to continue.', 'error');
     }
     throw new Error('AUTH_EXPIRED');
   }
 
-  // 429 — rate limited
   if (res.status === 429) {
     const retryAfter = parseInt(res.headers.get('Retry-After') || '30');
     rateLimitUntil = Date.now() + retryAfter * 1000;
@@ -1340,100 +1156,218 @@ async function authFetch(url, options = {}) {
   return res;
 }
 
-// ─── Sign out ─────────────────────────────────────────────────────────────
+// ─── Sign out ─────────────────────────────────────────────────────────────────
 function signOut() {
   accessToken = null;
   tokenExpiresAt = 0;
   clearTimeout(tokenExpireTimer);
   clearInterval(window._expiryInterval);
   updateAuthDots('');
-  for (let i = 1; i <= 4; i++) document.getElementById('step-' + i).classList.remove('active','done');
+  for (let i = 1; i <= 4; i++) document.getElementById('step-' + i).classList.remove('active', 'done');
   document.getElementById('step-1').classList.add('active');
   addLog('Disconnected.', '');
 }
 
+// ─── Preflight ────────────────────────────────────────────────────────────────
+async function runPreflight() {
+  const pf = document.getElementById('preflight');
+  pf.classList.add('visible');
+  const oldBtn = document.getElementById('pf-proceed-btn');
+  if (oldBtn) oldBtn.remove();
 
+  const setItem = (id, state, text) => {
+    const el = document.getElementById(id);
+    el.className = 'preflight-item ' + state;
+    const icons = { ok: '✓', fail: '✗', warn: '⚠', checking: '◌' };
+    el.textContent = (icons[state] || '◌') + ' ' + text;
+  };
 
+  setItem('pf-token',   'checking', 'Token — checking...');
+  setItem('pf-content', 'checking', 'Content — checking...');
+  setItem('pf-doc',     'checking', 'Document access — pending...');
 
+  const content = document.getElementById('content').value.trim();
+  await new Promise(r => setTimeout(r, 300));
 
-
-
-
-
-
-
-
-
-
-
-// ─── Pre-flight checklist ─────────────────────────────────────────────────
-
-// ─── Focus window lock ────────────────────────────────────────────────────
-window.addEventListener('beforeunload', (e) => {
-  if (!isStopped && sessionStart && charCount > 0) {
-    e.preventDefault();
-    e.returnValue = 'A writing session is in progress. Leave and lose progress?';
+  if (!accessToken) {
+    setItem('pf-token', 'fail', 'Token — missing. Go back to step 1.');
+    return;
   }
-});
 
-// ─── Spacebar pause/resume ────────────────────────────────────────────────
-document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
-    if (sessionStart && !isStopped) {
-      e.preventDefault();
-      togglePause();
-    }
+  try {
+    const td = await (await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken)).json();
+    if (td.error) { setItem('pf-token', 'fail', 'Token — invalid or expired. Get a new one from OAuth Playground.'); return; }
+    setItem('pf-token', 'ok', `Token — valid (${Math.floor(parseInt(td.expires_in || 0) / 60)} min remaining)`);
+  } catch(e) {
+    setItem('pf-token', 'ok', 'Token — present (could not verify expiry)');
   }
-});
 
+  if (!content) {
+    setItem('pf-content', 'fail', 'Content — empty. Go back to step 2 and paste your text.');
+    return;
+  }
+  setItem('pf-content', 'ok', `Content — ${content.split(/\s+/).filter(Boolean).length} words ready`);
 
+  setItem('pf-doc', 'checking', 'Document access — verifying...');
+  const mode = document.getElementById('doc-mode').value;
 
+  if (mode === 'new') {
+    setItem('pf-doc', 'ok', 'Document — new doc will be created on start');
+    await new Promise(r => setTimeout(r, 400));
+    pf.classList.remove('visible');
+    startWriting();
+    return;
+  }
 
-// ─── Sign out ─────────────────────────────────────────────────────────────
-// ─── Sign out ─────────────────────────────────────────────────────────────
+  const input = document.getElementById('existing-doc-id').value.trim();
+  if (!input) { setItem('pf-doc', 'fail', 'Document — no URL or ID entered.'); return; }
 
+  let testId;
+  try { testId = extractDocId(input); } catch(e) {
+    setItem('pf-doc', 'fail', 'Document — could not parse URL. Paste the full Google Doc URL.');
+    return;
+  }
 
-// ─── Step navigation ─────────────────────────────────────────────────────
+  try {
+    const res = await fetch(`https://docs.googleapis.com/v1/documents/${testId}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+    if (res.status === 401) { setItem('pf-doc', 'warn', 'Document — token lacks Docs API scope.'); addProceedAnyway(pf); return; }
+    if (res.status === 403) { setItem('pf-doc', 'warn', 'Document — permission denied. Check you have edit access.'); addProceedAnyway(pf); return; }
+    if (res.status === 404) { setItem('pf-doc', 'fail', 'Document — not found. Check the URL is correct.'); return; }
+    if (!res.ok) { setItem('pf-doc', 'warn', `Document — API returned ${res.status}. Proceed with caution.`); addProceedAnyway(pf); return; }
+    const doc = await res.json();
+    setItem('pf-doc', 'ok', `Document — "${doc.title || testId}" found and accessible`);
+  } catch(e) {
+    setItem('pf-doc', 'warn', 'Document — network error during check. Proceeding anyway.');
+    addProceedAnyway(pf);
+    return;
+  }
+
+  await new Promise(r => setTimeout(r, 400));
+  pf.classList.remove('visible');
+  startWriting();
+}
+
+function addProceedAnyway(pf) {
+  const btn = document.createElement('button');
+  btn.id = 'pf-proceed-btn';
+  btn.className = 'btn btn-ghost';
+  btn.style.cssText = 'margin-top:12px;font-size:11px;padding:7px 14px;';
+  btn.textContent = 'Proceed anyway →';
+  btn.onclick = () => { pf.classList.remove('visible'); btn.remove(); startWriting(); };
+  pf.appendChild(btn);
+}
+
+// ─── Session resets ───────────────────────────────────────────────────────────
+function resetToStep2() {
+  document.getElementById('content').value = '';
+  document.getElementById('session-label').value = '';
+  document.getElementById('doc-mode').value = 'existing';
+  toggleDocMode();
+  if (docId) document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${docId}/edit`;
+  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
+  document.getElementById('step-1').classList.add('done');
+  document.getElementById('step-2').classList.add('active');
+  addLog('Ready for next section. Token and doc preserved.', 'highlight');
+}
+
+function startNewSession() {
+  docId = null;
+  ['content', 'session-label', 'doc-title', 'existing-doc-id'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('doc-mode').value = 'new';
+  toggleDocMode();
+  sessionQueue = [];
+  currentQueueIndex = 0;
+  document.getElementById('queue-section').style.display = 'none';
+  document.getElementById('queue-list').innerHTML = '';
+  document.getElementById('doc-link-card').classList.remove('visible');
+  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
+  document.getElementById('step-1').classList.add('done');
+  document.getElementById('step-2').classList.add('active');
+  addLog('New session started. Token preserved.', 'highlight');
+}
+
+// ─── Checkpoint ───────────────────────────────────────────────────────────────
+function saveCheckpoint(chunkIndex, chunks, settings) {
+  try {
+    localStorage.setItem('dw_checkpoint', JSON.stringify({ chunkIndex, chunks, settings, docId, ts: Date.now() }));
+  } catch(e) {
+    addLog('Warning: checkpoint too large to save — crash restore disabled for this session.', '');
+  }
+}
+
+function clearCheckpoint() { try { localStorage.removeItem('dw_checkpoint'); } catch(e) {} }
+
+function checkForRestore() {
+  try {
+    const raw = localStorage.getItem('dw_checkpoint');
+    if (!raw) return;
+    const cp = JSON.parse(raw);
+    if (Date.now() - cp.ts > 24 * 60 * 60 * 1000) { clearCheckpoint(); return; }
+    window._pendingRestore = cp;
+    document.getElementById('restore-banner').classList.add('visible');
+  } catch(e) {}
+}
+
+function restoreSession() {
+  const cp = window._pendingRestore;
+  if (!cp) return;
+  document.getElementById('restore-banner').classList.remove('visible');
+  if (cp.settings) {
+    document.getElementById('duration').value   = cp.settings.duration  || '30';
+    document.getElementById('style').value      = cp.settings.style     || 'burst';
+    document.getElementById('typo-rate').value  = cp.settings.typoRate  || 'low';
+  }
+  if (cp.docId) {
+    docId = cp.docId;
+    document.getElementById('doc-mode').value = 'existing';
+    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${cp.docId}/edit`;
+    toggleDocMode();
+  }
+  window._restoreChunkIndex = cp.chunkIndex;
+  window._restoreChunks     = cp.chunks;
+  addLog('Restored checkpoint. Click Start writing to resume.', 'highlight');
+}
+
+function clearRestore() {
+  clearCheckpoint();
+  document.getElementById('restore-banner').classList.remove('visible');
+  window._pendingRestore = null;
+}
+
+// ─── Navigation & logging ─────────────────────────────────────────────────────
 function goToStep(n) {
-  for (let i = 1; i <= 4; i++) {
-    const s = document.getElementById(`step-${i}`);
-    s.classList.remove('active');
-  }
+  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active');
   document.getElementById(`step-${n}`).classList.add('active');
 }
 
-function markDone(n) {
-  document.getElementById(`step-${n}`).classList.add('done');
-}
+function markDone(n) { document.getElementById(`step-${n}`).classList.add('done'); }
 
-// ─── Logging ─────────────────────────────────────────────────────────────
 function addLog(msg, type = '') {
   const log = document.getElementById('log');
   const now = new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const el = document.createElement('div');
-  el.className = `log-entry ${type}`;
-  const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = now;
-  const ms = document.createElement('span'); ms.className = 'msg'; ms.textContent = msg;
-  el.appendChild(ts); el.appendChild(ms);
+  const el  = document.createElement('div');
+  el.className = 'log-entry ' + type;
+  const ts   = document.createElement('span'); ts.className   = 'ts';  ts.textContent  = now;
+  const msgEl = document.createElement('span'); msgEl.className = 'msg'; msgEl.textContent = msg;
+  el.append(ts, msgEl);
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
 }
 
-// ─── Stats ────────────────────────────────────────────────────────────────
-let timerInterval    = null;
-let effectiveElapsed = 0;   // ms of "effective" time consumed, accounting for speed
-let lastTimerTick    = null;
-
+// ─── Live timer ───────────────────────────────────────────────────────────────
 function startLiveTimer() {
   effectiveElapsed = 0;
-  lastTimerTick    = Date.now();
+  lastTimerTick = Date.now();
   if (timerInterval) clearInterval(timerInterval);
   timerInterval = setInterval(() => {
     if (!sessionStart || isStopped) return;
     const now  = Date.now();
     const real = now - lastTimerTick;
     lastTimerTick = now;
-    // Only advance effective time while not paused, scaled by current speed
     if (!isPaused) effectiveElapsed += real * (1 / speedMultiplier);
     const remaining = Math.max(0, totalDurationMs - effectiveElapsed);
     const mins = Math.floor(remaining / 60000);
@@ -1446,209 +1380,174 @@ function startLiveTimer() {
 function updateStats() {
   document.getElementById('stat-chars').textContent = charCount.toLocaleString();
   document.getElementById('stat-saves').textContent = saveCount;
-  const pct = Math.min(100, (charCount / totalChars) * 100);
+  const pct = totalChars > 0 ? Math.min(100, (charCount / totalChars) * 100) : 0;
   document.getElementById('progress-bar').style.width = pct + '%';
 }
 
-// ─── Realism engine ───────────────────────────────────────────────────────
-let totalChars = 0;
+// ─── Doc mode toggle ──────────────────────────────────────────────────────────
+function toggleDocMode() {
+  const mode = document.getElementById('doc-mode').value;
+  document.getElementById('new-doc-fields').style.display      = mode === 'new'      ? 'block' : 'none';
+  document.getElementById('existing-doc-fields').style.display = mode === 'existing' ? 'block' : 'none';
+}
 
-// QWERTY adjacency map for realistic adjacent-key typos
+function extractDocId(input) {
+  input = input.trim();
+  const match = input.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : input;
+}
+
+// ─── Realism engine ───────────────────────────────────────────────────────────
 const QWERTY_ADJACENT = {
-  a:['q','w','s','z'],b:['v','g','h','n'],c:['x','d','f','v'],
-  d:['s','e','r','f','c','x'],e:['w','r','s','d'],f:['d','r','t','g','v','c'],
-  g:['f','t','y','h','b','v'],h:['g','y','u','j','n','b'],i:['u','o','k','j'],
-  j:['h','u','i','k','n','m'],k:['j','i','o','l','m'],l:['k','o','p'],
-  m:['n','j','k'],n:['b','h','j','m'],o:['i','p','l','k'],
-  p:['o','l'],q:['w','a'],r:['e','t','d','f'],s:['a','w','e','d','x','z'],
-  t:['r','y','f','g'],u:['y','i','h','j'],v:['c','f','g','b'],
-  w:['q','e','a','s'],x:['z','s','d','c'],y:['t','u','g','h'],
-  z:['a','s','x']
+  a:['q','w','s','z'], b:['v','g','h','n'], c:['x','d','f','v'],
+  d:['s','e','r','f','c','x'], e:['w','r','s','d'], f:['d','r','t','g','v','c'],
+  g:['f','t','y','h','b','v'], h:['g','y','u','j','n','b'], i:['u','o','k','j'],
+  j:['h','u','i','k','n','m'], k:['j','i','o','l','m'], l:['k','o','p'],
+  m:['n','j','k'], n:['b','h','j','m'], o:['i','p','l','k'],
+  p:['o','l'], q:['w','a'], r:['e','t','d','f'], s:['a','w','e','d','x','z'],
+  t:['r','y','f','g'], u:['y','i','h','j'], v:['c','f','g','b'],
+  w:['q','e','a','s'], x:['z','s','d','c'], y:['t','u','g','h'], z:['a','s','x']
 };
 
-// Session personality seed — randomises all realism parameters slightly
 function buildPersonality() {
   return {
-    speedVariance: 0.7 + Math.random() * 0.6,      // 0.7–1.3 multiplier on delays
-    thinkFrequency: 0.02 + Math.random() * 0.02,   // how often thinking pauses occur (~1 per 25-50 words)
-    distractionChance: 0.006 + Math.random() * 0.006, // very rare long pauses
-    warmupWords: 8 + Math.floor(Math.random() * 12), // how many words in warmup
-    fatigueStart: 0.55 + Math.random() * 0.2,       // when fatigue kicks in (% through)
-    longWordThreshold: 7 + Math.floor(Math.random() * 3), // chars to trigger slowdown
+    speedVariance:     0.7 + Math.random() * 0.6,
+    thinkFrequency:    0.02 + Math.random() * 0.02,
+    distractionChance: 0.006 + Math.random() * 0.006,
+    warmupWords:       8 + Math.floor(Math.random() * 12),
+    fatigueStart:      0.55 + Math.random() * 0.2,
+    longWordThreshold: 7 + Math.floor(Math.random() * 3),
   };
 }
 
-// Detect if a word starts a heading (all-caps, or ends with a colon, or is a known heading word)
-function looksLikeHeading(word, prevWord, isFirstWordOfPara) {
-  // All-caps word of 3+ letters (e.g. ABSTRACT, TCP/IP headings)
-  // Excludes short acronyms like TCP, LEO, GEO which are not headings
-  if (/^[A-Z]{4,}$/.test(word)) return true;
-  // Word immediately following a colon
-  if (prevWord && prevWord.endsWith(':')) return true;
-  return false;
-}
+function isSentenceEnd(word)    { return /[.!?]$/.test(word.trim()); }
+function isClauseBoundary(word) { return /[,;:]$/.test(word.trim()); }
 
-// Detect sentence end in previous word
-function isSentenceEnd(word) {
-  return /[.!?]$/.test(word.trim());
-}
-
-// Detect clause boundary
-function isClauseBoundary(word) {
-  return /[,;:]$/.test(word.trim());
-}
-
-// Detect paragraph break token
-function isParagraphBreak(word) {
-  return word === '\n' || word === '\n\n';
-}
-
-// Build the full word list, preserving paragraph breaks as tokens
 function buildWordList(text) {
   const words = [];
   const paragraphs = text.split(/\n\n+/);
   paragraphs.forEach((para, pi) => {
-    const trimmed = para.trim();
-    const isHeadingPara = trimmed.startsWith('## ');
-    const cleanPara = isHeadingPara ? trimmed.slice(3).trim() : trimmed;
-    const paraWords = cleanPara.split(/\s+/).filter(Boolean);
-    paraWords.forEach((w, wi) => {
-      words.push({
-        word: w,
-        isParaBreak: false,
-        isHeading: isHeadingPara && wi === 0,
-      });
+    const trimmed   = para.trim();
+    const isHeading = trimmed.startsWith('## ');
+    const clean     = isHeading ? trimmed.slice(3).trim() : trimmed;
+    clean.split(/\s+/).filter(Boolean).forEach((w, wi) => {
+      words.push({ word: w, isParaBreak: false, isHeading: isHeading && wi === 0 });
     });
-    if (pi < paragraphs.length - 1) {
-      words.push({ word: '\n\n', isParaBreak: true });
-    }
+    if (pi < paragraphs.length - 1) words.push({ word: '\n\n', isParaBreak: true });
   });
   return words;
 }
 
-// Compute delay for this word based on all realism factors
-function computeDelay(wordObj, i, totalWords, msPerWord, style, personality, elapsed, totalDurationMs) {
-  const { word, isParaBreak } = wordObj;
-  let delay = msPerWord * personality.speedVariance;
+// Group words into variable-size chunks (5–20 words), splitting at paragraph breaks.
+// Version history will show sentence-fragment bursts instead of one word per entry.
+function buildChunks(wordObjs) {
+  const chunks = [];
+  let i = 0;
+  while (i < wordObjs.length) {
+    if (wordObjs[i].isParaBreak) { chunks.push({ type: 'break' }); i++; continue; }
+    const size  = 5 + Math.floor(Math.random() * 16);
+    const words = [];
+    while (i < wordObjs.length && words.length < size && !wordObjs[i].isParaBreak) {
+      words.push(wordObjs[i++]);
+    }
+    chunks.push({ type: 'text', words });
+  }
+  return chunks;
+}
 
-  // Base randomisation by style
+// Per-word delay — relative floor (15% of target pace) replaces old hardcoded 500ms
+// which would cause long documents to wildly exceed their target duration.
+function computeWordDelay(msPerWord, style, personality) {
+  let delay = msPerWord * personality.speedVariance;
   if (style === 'burst') {
-    // Burst: fast sprints (0.3–0.8×) and occasional slow stretches (1.5–2.5×)
     delay *= Math.random() < 0.25 ? (1.5 + Math.random()) : (0.3 + Math.random() * 0.5);
   } else if (style === 'slow') {
     delay *= 0.85 + Math.random() * 0.45;
   } else {
-    // Steady
     delay *= 0.5 + Math.random() * 1.0;
   }
-
-  // WPM ceiling — never go faster than ~120 WPM (500ms per word minimum)
-  delay = Math.max(delay, 500);
-
-  return delay;
+  return Math.max(delay, msPerWord * 0.15);
 }
 
-// Build the extra pause to add after computing base delay
-// Always returns { extra, isThink, isDistraction, isHeading }
-function computeExtraPause(wordObj, i, prevWordStr, totalWords, msPerWord, style, personality, elapsed, totalDurationMs) {
-  const { word, isParaBreak } = wordObj;
+function computeExtraPause(wordObj, prevWordStr, wordsDone, totalWords, msPerWord, personality) {
+  if (wordObj.isParaBreak) return { ms: msPerWord * (0.8 + Math.random() * 1.2), tag: null };
+
   let extra = 0;
-  let isThink = false, isDistraction = false, isHeading = false;
+  const { word } = wordObj;
 
-  // Paragraph break — long pause, return immediately
-  if (isParaBreak) {
-    extra += msPerWord * (2 + Math.random() * 3);
-    return { extra, isThink, isDistraction, isHeading };
+  if (prevWordStr && isSentenceEnd(prevWordStr))   extra += msPerWord * (0.3 + Math.random() * 0.4);
+  if (prevWordStr && isClauseBoundary(prevWordStr)) extra += msPerWord * (0.1 + Math.random() * 0.15);
+  if (wordObj.isHeading) extra += msPerWord * (0.6 + Math.random() * 0.8);
+  if (word.replace(/[^a-zA-Z]/g, '').length >= personality.longWordThreshold)
+    extra += msPerWord * (0.1 + Math.random() * 0.1);
+
+  if (wordsDone > 0 && Math.random() < personality.thinkFrequency)
+    return { ms: extra + msPerWord * (0.3 + Math.random() * 0.4), tag: 'think' };
+
+  if (wordsDone > 10 && Math.random() < personality.distractionChance) {
+    const d = (10 + Math.random() * 20) * 1000;
+    return { ms: extra + d, tag: 'distract', distractSecs: Math.round(d / 1000) };
   }
 
-  // Heading pause — ## marker or all-caps 4+ letter word or after colon
-  const isFirstWordOfPara = (prevWordStr === null);
-  if (wordObj.isHeading || looksLikeHeading(word, prevWordStr, isFirstWordOfPara)) {
-    extra += msPerWord * (2 + Math.random() * 2.5);
-    isHeading = true;
-  }
+  if (wordsDone < personality.warmupWords)
+    extra += msPerWord * (0.1 + Math.random() * 0.15) * (1 - wordsDone / personality.warmupWords);
 
-  // Sentence end in previous word
-  if (prevWordStr && isSentenceEnd(prevWordStr)) {
-    extra += msPerWord * (0.8 + Math.random() * 1.2);
-  }
-
-  // Clause boundary pause (comma, semicolon, colon)
-  if (prevWordStr && isClauseBoundary(prevWordStr)) {
-    extra += msPerWord * (0.3 + Math.random() * 0.4);
-  }
-
-  // Long word slowdown
-  if (word.replace(/[^a-zA-Z]/g, '').length >= personality.longWordThreshold) {
-    extra += msPerWord * (0.2 + Math.random() * 0.3);
-  }
-
-  // Thinking pause
-  if (i > 0 && Math.random() < personality.thinkFrequency) {
-    extra += msPerWord * (0.8 + Math.random() * 1.2);
-    isThink = true;
-  }
-
-  // Distraction — very rare long pause
-  if (i > 10 && Math.random() < personality.distractionChance) {
-    extra += (30 + Math.random() * 60) * 1000;
-    isDistraction = true;
-  }
-
-  // Warmup — first N words are slower
-  if (i < personality.warmupWords) {
-    extra += msPerWord * (0.3 + Math.random() * 0.4) * (1 - i / personality.warmupWords);
-  }
-
-  // Fatigue — slow down gradually in second half
-  const progress = i / totalWords;
+  const progress = wordsDone / totalWords;
   if (progress > personality.fatigueStart) {
-    const fatigueFactor = (progress - personality.fatigueStart) / (1 - personality.fatigueStart);
-    extra += msPerWord * fatigueFactor * (0.2 + Math.random() * 0.3);
+    const f = (progress - personality.fatigueStart) / (1 - personality.fatigueStart);
+    extra += msPerWord * f * (0.1 + Math.random() * 0.1);
   }
 
-  return { extra, isThink, isDistraction, isHeading };
+  // Cap total extra per word at 80% of msPerWord so pauses never dominate
+  return { ms: Math.min(extra, msPerWord * 0.8), tag: null };
 }
 
-// ─── Typo engine ─────────────────────────────────────────────────────────
-function generateTypo(word, rate) {
+// Adaptive pacing: compare actual word progress vs elapsed time progress,
+// nudge paceMultiplier to keep the session on schedule.
+function updatePaceMultiplier(wordsDone, totalWords, elapsed) {
+  if (totalWords === 0 || totalDurationMs === 0) return;
+  const expectedProgress = Math.min(elapsed / totalDurationMs, 1);
+  const actualProgress   = wordsDone / totalWords;
+  const drift = actualProgress - expectedProgress;
+  if      (drift < -0.1)  paceMultiplier = Math.max(0.3, paceMultiplier * 0.85);
+  else if (drift < -0.05) paceMultiplier = Math.max(0.3, paceMultiplier * 0.92);
+  else if (drift >  0.1)  paceMultiplier = Math.min(2.0, paceMultiplier * 1.10);
+  else if (drift >  0.05) paceMultiplier = Math.min(2.0, paceMultiplier * 1.05);
+  else                    paceMultiplier = paceMultiplier * 0.95 + 1.0 * 0.05;
+}
+
+// Typo probability is boosted when typing fast (clustered errors during sprints).
+function generateTypo(word, rate, recentDelayMs, msPerWord) {
   if (rate === '0' || word.length < 3) return null;
-  const baseProb = rate === 'medium' ? 0.12 : 0.06;
-  if (Math.random() > baseProb) return null;
+  let prob = rate === 'medium' ? 0.12 : 0.06;
+  if (recentDelayMs < msPerWord * 0.5) prob *= 1.8;
+  if (Math.random() > prob) return null;
 
-  const typoType = Math.random();
-
-  if (typoType < 0.35) {
-    // Transposition — swap two adjacent letters (teh → the)
+  const r = Math.random();
+  if (r < 0.35) {
     const pos = 1 + Math.floor(Math.random() * (word.length - 2));
     return word.slice(0, pos) + word[pos+1] + word[pos] + word.slice(pos+2);
-  } else if (typoType < 0.6) {
-    // Adjacent key substitution
+  } else if (r < 0.6) {
     const pos = 1 + Math.floor(Math.random() * (word.length - 2));
-    const ch = word[pos].toLowerCase();
+    const ch  = word[pos].toLowerCase();
     const adj = QWERTY_ADJACENT[ch];
     if (!adj) return null;
-    const replacement = adj[Math.floor(Math.random() * adj.length)];
-    return word.slice(0, pos) + replacement + word.slice(pos+1);
-  } else if (typoType < 0.75) {
-    // Double letter — duplicate a character
+    return word.slice(0, pos) + adj[Math.floor(Math.random() * adj.length)] + word.slice(pos+1);
+  } else if (r < 0.75) {
     const pos = 1 + Math.floor(Math.random() * (word.length - 2));
     return word.slice(0, pos) + word[pos] + word.slice(pos);
-  } else {
-    // Missed space — just return null, handled separately at call site
-    return null;
   }
+  return null;
 }
 
-// Variable correction speed — sometimes instant, sometimes after a beat
 function correctionDelay() {
   const r = Math.random();
-  if (r < 0.3) return 200 + Math.random() * 300;   // quick catch
-  if (r < 0.7) return 600 + Math.random() * 800;   // normal notice
-  return 1200 + Math.random() * 1500;               // slow catch
+  if (r < 0.3) return 200 + Math.random() * 300;
+  if (r < 0.7) return 600 + Math.random() * 800;
+  return 1200 + Math.random() * 1500;
 }
 
-// ─── Google Docs API calls ────────────────────────────────────────────────
+// ─── Google Docs API ──────────────────────────────────────────────────────────
 async function createDoc(title) {
   const res = await authFetch('https://docs.googleapis.com/v1/documents', {
     method: 'POST',
@@ -1658,57 +1557,59 @@ async function createDoc(title) {
   return await res.json();
 }
 
-async function appendToDoc(docId, text, endIndex) {
-  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
+async function appendToDoc(id, text, endIndex) {
+  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${id}:batchUpdate`, {
     method: 'POST',
-    body: JSON.stringify({
-      requests: [{ insertText: { location: { index: endIndex }, text } }]
-    })
+    body: JSON.stringify({ requests: [{ insertText: { location: { index: endIndex }, text } }] })
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`API error: ${err}`);
-  }
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
   return await res.json();
 }
 
-async function deleteFromDoc(docId, startIndex, endIndex) {
-  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
+async function deleteFromDoc(id, startIndex, endIndex) {
+  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${id}:batchUpdate`, {
     method: 'POST',
-    body: JSON.stringify({
-      requests: [{ deleteContentRange: { range: { startIndex, endIndex } } }]
-    })
+    body: JSON.stringify({ requests: [{ deleteContentRange: { range: { startIndex, endIndex } } }] })
   });
-  if (!res.ok) throw new Error('Delete failed');
+  if (!res.ok) throw new Error('Delete failed: ' + res.status);
 }
 
-async function getDocEndIndex(docId) {
-  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${docId}`);
-  if (!res.ok) {
-    console.error('getDocEndIndex failed:', res.status);
-    return 1;
-  }
-  const doc = await res.json();
+// Apply Google Docs heading style to a paragraph range
+async function applyHeadingStyle(id, startIndex, endIndex) {
   try {
-    const body = doc.body.content;
-    const last = body[body.length - 1];
-    const idx = (last.endIndex || 2) - 1;
-    return Math.max(1, idx);
+    await authFetch(`https://docs.googleapis.com/v1/documents/${id}:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [{
+          updateParagraphStyle: {
+            range: { startIndex, endIndex },
+            paragraphStyle: { namedStyleType: 'HEADING_1' },
+            fields: 'namedStyleType'
+          }
+        }]
+      })
+    });
   } catch(e) {
-    return 1;
+    console.warn('Heading style apply failed:', e.message);
   }
 }
 
-// ─── Sleep helper ─────────────────────────────────────────────────────────
+async function getDocEndIndex(id) {
+  const res = await authFetch(`https://docs.googleapis.com/v1/documents/${id}`);
+  if (!res.ok) return 1;
+  try {
+    const doc  = await res.json();
+    const body = doc.body.content;
+    return Math.max(1, (body[body.length - 1].endIndex || 2) - 1);
+  } catch(e) { return 1; }
+}
+
+// ─── Sleep helpers ────────────────────────────────────────────────────────────
 function sleep(ms) {
-  return new Promise(resolve => {
-    writeTimer = setTimeout(resolve, ms);
-  });
+  return new Promise(resolve => { writeTimer = setTimeout(resolve, ms); });
 }
 
 async function sleepWithPauseCheck(ms) {
-  // Re-reads speedMultiplier on every tick so slider changes
-  // take effect immediately mid-delay, not just on the next word.
   const start = Date.now();
   while (true) {
     if (isStopped) return;
@@ -1717,87 +1618,77 @@ async function sleepWithPauseCheck(ms) {
     const target  = ms * speedMultiplier;
     if (elapsed >= target) return;
     if (!isPaused) await sleep(Math.min(100, target - elapsed));
-    else await sleep(100);
+    else           await sleep(100);
   }
 }
 
-// ─── Doc mode toggle ──────────────────────────────────────────────────────
-function toggleDocMode() {
-  const mode = document.getElementById('doc-mode').value;
-  document.getElementById('new-doc-fields').style.display = mode === 'new' ? 'block' : 'none';
-  document.getElementById('existing-doc-fields').style.display = mode === 'existing' ? 'block' : 'none';
-}
-
-function extractDocId(input) {
-  input = input.trim();
-  // If it's a URL, extract the ID
-  const match = input.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
-  if (match) return match[1];
-  // Otherwise assume it's already an ID
-  return input;
-}
-
-// ─── Test connection ──────────────────────────────────────────────────────
+// ─── Test connection ──────────────────────────────────────────────────────────
 async function testConnection() {
   document.getElementById('progress-panel').style.display = 'block';
   document.getElementById('log').innerHTML = '';
   addLog('Testing Google Docs connection...', 'highlight');
   try {
-    // Use tokeninfo — read-only, creates no docs, no Drive clutter
-    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
+    const res  = await authFetch('https://docs.googleapis.com/v1/documents', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'DocWriter Test — Delete Me' })
+    });
     const data = await res.json();
-    if (data.error) {
-      updateAuthDots('red');
-      addLog('Connection failed: ' + data.error, 'error');
-    } else {
-      const secs = parseInt(data.expires_in || 0);
-      const m = Math.floor(secs / 60), s = secs % 60;
-      updateAuthDots('green');
-      addLog('Token valid — ' + m + ':' + String(s).padStart(2,'0') + ' remaining. Scopes: ' + (data.scope || 'unknown'), 'success');
+    if (!data.documentId) { addLog('API responded but no doc ID: ' + JSON.stringify(data), 'error'); return; }
+
+    updateAuthDots('green');
+    addLog('Connection works! Cleaning up test doc...', 'success');
+
+    // Delete the test doc so it doesn't clutter Drive
+    try {
+      await fetch(`https://www.googleapis.com/drive/v3/files/${data.documentId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + accessToken }
+      });
+      addLog('Test doc deleted. Connection confirmed — ready to write.', 'success');
+    } catch(e) {
+      addLog('Connection works (test doc created — delete "DocWriter Test" from Drive manually).', 'success');
     }
-  } catch (err) {
-    addLog('Connection test failed: ' + err.message, 'error');
+  } catch(err) {
+    addLog('Connection failed: ' + err.message, 'error');
   }
 }
 
-
+// ─── Main writing loop ────────────────────────────────────────────────────────
 async function startWriting() {
   if (!accessToken) { alert('Please connect to Google first.'); return; }
 
-  const title = document.getElementById('doc-title').value.trim() || 'My Document';
-  const content = document.getElementById('content').value.trim();
+  const content      = document.getElementById('content').value.trim();
+  const title        = document.getElementById('doc-title').value.trim() || 'My Document';
   const durationMins = parseInt(document.getElementById('duration').value);
-  const style = document.getElementById('style').value;
-  const typoRate = document.getElementById('typo-rate').value;
+  const style        = document.getElementById('style').value;
+  const typoRate     = document.getElementById('typo-rate').value;
   const sessionLabel = document.getElementById('session-label').value.trim() || 'Session';
 
   if (!content) { alert('Please paste some content first.'); return; }
 
-  isStopped = false;
-  isPaused = false;
-  saveCount = 0;
-  charCount = 0;
-  rateLimitUntil = 0;
+  isStopped         = false;
+  isPaused          = false;
+  saveCount         = 0;
+  charCount         = 0;
+  paceMultiplier    = 1.0;
+  rateLimitUntil    = 0;
   consecutiveErrors = 0;
-  totalChars = content.length;
-  totalDurationMs = durationMins * 60 * 1000;
-  sessionStart = Date.now();
-  speedMultiplier = 1.0;
-  document.getElementById('speed-slider').value = 100;
-  document.getElementById('speed-val').textContent = '1×';
-  startLiveTimer();
+  totalChars        = content.length;
+  totalDurationMs   = durationMins * 60 * 1000;
+  sessionStart      = Date.now();
+  speedMultiplier   = 1.0;
 
+  document.getElementById('speed-slider').value           = 100;
+  document.getElementById('speed-val').textContent        = '1×';
   document.getElementById('progress-panel').style.display = 'block';
-  document.getElementById('status-badge').textContent = 'Running';
-  document.getElementById('status-badge').className = 'status-badge running';
-  document.getElementById('pause-btn').textContent = 'Pause';
+  document.getElementById('status-badge').textContent     = 'Running';
+  document.getElementById('status-badge').className       = 'status-badge running';
+  document.getElementById('pause-btn').textContent        = 'Pause';
   document.getElementById('manual-advance-btn').classList.remove('visible');
   document.getElementById('session-label-display').textContent = sessionLabel;
-  markDone(2);
-  markDone(3);
-  goToStep(3);
-
   document.getElementById('log').innerHTML = '';
+  markDone(2); markDone(3); goToStep(3);
+  startLiveTimer();
 
   const personality = buildPersonality();
   addLog(`Session: "${sessionLabel}" — personality seeded (speed ×${personality.speedVariance.toFixed(2)})`, 'highlight');
@@ -1809,72 +1700,75 @@ async function startWriting() {
       const input = document.getElementById('existing-doc-id').value.trim();
       if (!input) { addLog('Please enter an existing doc ID or URL.', 'error'); return; }
       docId = extractDocId(input);
-      const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+      const url = `https://docs.google.com/document/d/${docId}/edit`;
       document.getElementById('doc-link-title').textContent = 'Existing Document';
-      document.getElementById('doc-link-href').href = docUrl;
+      document.getElementById('doc-link-href').href = url;
       document.getElementById('doc-link-card').classList.add('visible');
       addLog(`Using existing doc: ${docId}`, 'success');
     } else {
       addLog(`Creating document: "${title}"`, 'highlight');
       const doc = await createDoc(title);
       docId = doc.documentId;
-      const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+      const url = `https://docs.google.com/document/d/${docId}/edit`;
       document.getElementById('doc-link-title').textContent = title;
-      document.getElementById('doc-link-href').href = docUrl;
+      document.getElementById('doc-link-href').href = url;
       document.getElementById('doc-link-card').classList.add('visible');
-      addLog(`Doc created. ID: ${docId}`, 'success');
+      addLog(`Doc created: ${docId}`, 'success');
     }
 
-    // Build word list preserving paragraph breaks as tokens
+    // Build chunks from word list
     let wordObjs = buildWordList(content);
-    let startIndex = 0;
+    let chunks   = buildChunks(wordObjs);
+    let startChunkIndex = 0;
 
     // Restore from checkpoint if available
-    if (window._restoreWordIndex != null && window._restoreWordObjs) {
-      wordObjs = window._restoreWordObjs;
-      startIndex = window._restoreWordIndex;
-      addLog(`Resuming from word ${startIndex}`, 'highlight');
-      window._restoreWordIndex = null;
-      window._restoreWordObjs = null;
+    if (window._restoreChunkIndex != null && window._restoreChunks) {
+      chunks = window._restoreChunks;
+      startChunkIndex = window._restoreChunkIndex;
+      addLog(`Resuming from chunk ${startChunkIndex}`, 'highlight');
+      window._restoreChunkIndex = null;
+      window._restoreChunks     = null;
     }
 
-    const realWords = wordObjs.filter(w => !w.isParaBreak);
-    const totalWords = realWords.length;
-    const msPerWord = totalDurationMs / totalWords;
-    const settings = { duration: durationMins, style, typoRate };
+    const totalWords = wordObjs.filter(w => !w.isParaBreak).length;
+    const msPerWord  = totalDurationMs / Math.max(totalWords, 1);
+    const settings   = { duration: durationMins, style, typoRate };
 
-    addLog(`Writing ${totalWords} words over ${durationMins} min (~${Math.round(msPerWord/1000)}s/word avg)...`);
-    addLog(`Realism: sentence pauses, paragraph breaks, fatigue, ${typoRate !== '0' ? 'typos' : 'no typos'}`, '');
+    addLog(`Writing ${totalWords} words over ${durationMins} min (~${Math.round(msPerWord/1000)}s/word avg)`, '');
+    addLog(`Realism: chunk bursts, adaptive pacing, sentence pauses, fatigue${typoRate !== '0' ? ', clustered typos' : ''}`, '');
 
     let currentEndIndex = await getDocEndIndex(docId);
     addLog(`Starting at doc position ${currentEndIndex}`, 'highlight');
 
-    // When continuing an existing doc, insert a paragraph break first
-    // so new content doesn't run into the previous session's text
-    if (document.getElementById('doc-mode').value === 'existing' && currentEndIndex > 2) {
+    if (mode === 'existing' && currentEndIndex > 2) {
       await appendToDoc(docId, '\n\n', currentEndIndex);
       currentEndIndex += 2;
-      addLog('Inserted paragraph break before new content.', '');
+      saveCount++;
     }
 
-    let wordsDone = 0;
-    let typoCount = 0;
+    let wordsDone   = 0;
+    let typoCount   = 0;
     let prevWordStr = null;
+    let recentDelayMs = msPerWord;
 
-    for (let i = startIndex; i < wordObjs.length; i++) {
+    for (let ci = startChunkIndex; ci < chunks.length; ci++) {
       if (isStopped) break;
 
-      // Save checkpoint every 20 words
-      if (wordsDone > 0 && wordsDone % 20 === 0) {
-        saveCheckpoint(i, wordObjs, settings);
+      // Checkpoint every 5 chunks
+      if (ci > startChunkIndex && (ci - startChunkIndex) % 5 === 0) {
+        saveCheckpoint(ci, chunks, settings);
       }
 
-      const wordObj = wordObjs[i];
-      const { word, isParaBreak } = wordObj;
+      // Adaptive pacing check every 10 chunks
+      if (ci > 0 && ci % 10 === 0) {
+        updatePaceMultiplier(wordsDone, totalWords, Date.now() - sessionStart);
+      }
 
-      // ── Paragraph break token ──────────────────────────────────────────
-      if (isParaBreak) {
-        const paraPause = msPerWord * (2.5 + Math.random() * 3);
+      const chunk = chunks[ci];
+
+      // ── Paragraph break ────────────────────────────────────────────────────
+      if (chunk.type === 'break') {
+        const paraPause = msPerWord * (2.5 + Math.random() * 3) * paceMultiplier;
         addLog(`...paragraph break (${Math.round(paraPause/1000)}s pause)`, '');
         await sleepWithPauseCheck(paraPause);
         if (isStopped) break;
@@ -1886,79 +1780,142 @@ async function startWriting() {
         continue;
       }
 
-      // ── Compute delays ─────────────────────────────────────────────────
-      const isFirst = (i === 0 && currentEndIndex <= 2);
-      const elapsed = Date.now() - sessionStart;
-      let delay = computeDelay(wordObj, wordsDone, totalWords, msPerWord, style, personality, elapsed, totalDurationMs);
-      const extra = computeExtraPause(wordObj, wordsDone, prevWordStr, totalWords, msPerWord, style, personality, elapsed, totalDurationMs);
-      const extraMs = extra.extra || 0;
+      // ── Text chunk ─────────────────────────────────────────────────────────
+      const chunkWords = chunk.words;
 
-      if (extra.isDistraction) addLog(`...distracted (${Math.round(extraMs/1000)}s)`, '');
-      else if (extra.isThink) addLog(`...thinking pause`, '');
-      else if (extra.isHeading) addLog(`...heading pause before "${word}"`, 'highlight');
+      // Sum delay across all words in this chunk
+      let chunkDelay = 0;
+      chunkWords.forEach((wo, wi) => {
+        const base  = computeWordDelay(msPerWord, style, personality) * paceMultiplier;
+        const extra = computeExtraPause(wo, wi === 0 ? prevWordStr : chunkWords[wi-1].word, wordsDone + wi, totalWords, msPerWord, personality);
+        if (extra.tag === 'distract') addLog(`...distracted (${extra.distractSecs}s)`, '');
+        else if (extra.tag === 'think') addLog(`...thinking pause`, '');
+        chunkDelay += base + extra.ms;
+      });
+      recentDelayMs = chunkDelay / chunkWords.length;
 
-      if (i > startIndex) await sleepWithPauseCheck(delay + extraMs);
+      if (ci > startChunkIndex) await sleepWithPauseCheck(chunkDelay);
       if (isStopped) break;
 
-      // ── Typo logic ─────────────────────────────────────────────────────
-      const typoWord = generateTypo(word, typoRate);
-      const textToInsert = isFirst ? word : ' ' + word;
+      const isFirstInsert = (ci === startChunkIndex && currentEndIndex <= 2);
 
-      // Typo sequence runs once and independently — not retried
-      if (typoWord) {
-        try {
-          const typoInsert = isFirst ? typoWord : ' ' + typoWord;
-          await appendToDoc(docId, typoInsert, currentEndIndex);
-          currentEndIndex += typoInsert.length;
-          charCount += typoInsert.length;
-          saveCount++;
-          updateStats();
-          addLog(`Typed "${typoWord}" (typo)`);
-          typoCount++;
+      // Pre-generate typos for every word in the chunk so we commit before inserting
+      const typoVariants = chunkWords.map(wo => generateTypo(wo.word, typoRate, recentDelayMs, msPerWord));
+      const typoIdx      = typoVariants.findIndex(t => t !== null);
 
-          await sleepWithPauseCheck(correctionDelay());
-          if (isStopped) break;
-
-          const deleteStart = currentEndIndex - typoInsert.length + (isFirst ? 0 : 1);
-          await deleteFromDoc(docId, deleteStart, currentEndIndex);
-          currentEndIndex = deleteStart;
-          charCount -= typoInsert.length;
-          saveCount++;
-          updateStats();
-
-          await sleepWithPauseCheck(200 + Math.random() * 350);
-          if (isStopped) break;
-        } catch(typoErr) {
-          // If typo sequence fails, re-fetch position and continue to correct insert
-          addLog(`Typo sequence failed — recovering position.`, 'error');
-          try { currentEndIndex = await getDocEndIndex(docId); } catch(e) {}
-        }
-      }
-
-      // Correct word insert — retried up to 3 times
       let retries = 0;
       let success = false;
+
       while (!success && retries < 3) {
         try {
-          await appendToDoc(docId, textToInsert, currentEndIndex);
-          currentEndIndex += textToInsert.length;
-          charCount += textToInsert.length;
-          saveCount++;
-          wordsDone++;
-          updateStats();
-          if (typoWord) addLog(`Corrected → "${word}"`, 'highlight');
-          else if (wordsDone % 10 === 0) addLog(`Wrote ${wordsDone}/${totalWords} words`);
-          prevWordStr = word;
+          if (typoIdx >= 0 && retries === 0) {
+            // ── Chunk with typo: pre-typo words → typo insert → delete → correct + rest ──
+
+            // Insert words before the typo word (if any)
+            if (typoIdx > 0) {
+              const preText = chunkWords.slice(0, typoIdx)
+                .map((wo, wi) => (isFirstInsert && wi === 0) ? wo.word : ' ' + wo.word).join('');
+              await appendToDoc(docId, preText, currentEndIndex);
+              currentEndIndex += preText.length;
+              charCount       += preText.length;
+              saveCount++;
+              updateStats();
+            }
+
+            // Apply heading style if first word is a heading
+            if (chunkWords[0].isHeading && typoIdx > 0) {
+              const hStart = currentEndIndex - chunkWords.slice(0, typoIdx).map(w => w.word).join(' ').length - (isFirstInsert ? 0 : 1);
+              await applyHeadingStyle(docId, Math.max(1, hStart), currentEndIndex);
+            }
+
+            // Insert typo word
+            const typoStr    = typoVariants[typoIdx];
+            const typoInsert = (isFirstInsert && typoIdx === 0) ? typoStr : ' ' + typoStr;
+            await appendToDoc(docId, typoInsert, currentEndIndex);
+            currentEndIndex += typoInsert.length;
+            charCount       += typoInsert.length;
+            saveCount++;
+            updateStats();
+            addLog(`Typed "${typoStr}" (typo)`, '');
+            typoCount++;
+
+            await sleepWithPauseCheck(correctionDelay());
+            if (isStopped) break;
+
+            // Delete the typo — retry the delete independently so a delete failure
+            // doesn't cause us to re-insert the typo on the outer retry loop.
+            const deleteStart = currentEndIndex - typoInsert.length;
+            let deleteRetries = 0;
+            while (deleteRetries < 3) {
+              try {
+                await deleteFromDoc(docId, deleteStart, currentEndIndex);
+                break;
+              } catch(e) {
+                deleteRetries++;
+                if (deleteRetries >= 3) throw e;
+                await sleepWithPauseCheck(1000 * deleteRetries);
+                currentEndIndex = await getDocEndIndex(docId);
+              }
+            }
+            currentEndIndex  = deleteStart;
+            charCount       -= typoInsert.length;
+            saveCount++;
+            updateStats();
+
+            await sleepWithPauseCheck(200 + Math.random() * 350);
+            if (isStopped) break;
+
+            // Insert correct word + remaining words in chunk
+            const restWords   = [chunkWords[typoIdx], ...chunkWords.slice(typoIdx + 1)];
+            const restText    = restWords.map((wo, wi) =>
+              (isFirstInsert && typoIdx === 0 && wi === 0) ? wo.word : ' ' + wo.word
+            ).join('');
+            await appendToDoc(docId, restText, currentEndIndex);
+            currentEndIndex += restText.length;
+            charCount       += restText.length;
+            saveCount++;
+            wordsDone       += chunkWords.length;
+            updateStats();
+            addLog(`Corrected → "${chunkWords[typoIdx].word}"${chunkWords.length - typoIdx - 1 > 0 ? ` + ${chunkWords.length - typoIdx - 1} more` : ''}`, 'highlight');
+
+          } else {
+            // ── Clean chunk — single API call ────────────────────────────────
+            const text = chunkWords.map((wo, wi) =>
+              (isFirstInsert && wi === 0) ? wo.word : ' ' + wo.word
+            ).join('');
+            const headingStart = currentEndIndex;
+            await appendToDoc(docId, text, currentEndIndex);
+            currentEndIndex += text.length;
+            charCount       += text.length;
+            saveCount++;
+            wordsDone       += chunkWords.length;
+            updateStats();
+
+            // Apply heading style if first word of chunk is a heading
+            if (chunkWords[0].isHeading) {
+              const hStart = headingStart + (isFirstInsert ? 0 : 1);
+              const hEnd   = hStart + chunkWords[0].word.length;
+              await applyHeadingStyle(docId, hStart, hEnd + 1);
+            }
+
+            if (wordsDone % 10 === 0 || chunkWords.length >= 10)
+              addLog(`Wrote ${wordsDone}/${totalWords} words`, '');
+          }
+
+          prevWordStr = chunkWords[chunkWords.length - 1].word;
           success = true;
-        } catch (err) {
+
+        } catch(err) {
+          if (err.message === 'AUTH_EXPIRED' || err.message === 'RATE_LIMITED') throw err;
           retries++;
           if (retries < 3) {
-            addLog(`Insert failed (attempt ${retries}/3) — retrying...`, 'error');
+            addLog(`Chunk insert failed (attempt ${retries}/3) — retrying...`, 'error');
             await sleepWithPauseCheck(1500 * retries);
             try { currentEndIndex = await getDocEndIndex(docId); } catch(e) {}
           } else {
-            addLog(`Word "${word}" failed after 3 retries — skipping.`, 'error');
-            success = true;
+            addLog(`Chunk failed after 3 retries — skipping ${chunkWords.length} words.`, 'error');
+            wordsDone += chunkWords.length;
+            success    = true;
           }
         }
       }
@@ -1967,75 +1924,90 @@ async function startWriting() {
     clearCheckpoint();
 
     if (!isStopped) {
+      isStopped = true; // prevent false "leave page?" prompt after session completes
+      clearInterval(timerInterval);
       const elapsed = Math.round((Date.now() - sessionStart) / 1000);
       const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
       document.getElementById('status-badge').textContent = 'Complete';
-      document.getElementById('status-badge').className = 'status-badge done';
-      isStopped = true; // prevent beforeunload on completed sessions
+      document.getElementById('status-badge').className   = 'status-badge done';
+      document.getElementById('stat-time').textContent    = '0:00';
       addLog(`Writing complete. ${saveCount} version history entries created.`, 'success');
 
-      // Populate complete summary
-      const summary = document.getElementById('complete-summary');
-      summary.textContent = '';
+      // Build complete summary safely (no innerHTML with user data)
+      const summaryEl = document.getElementById('complete-summary');
+      summaryEl.innerHTML = '';
       [
-        'Label: ' + sessionLabel,
-        'Words written: ' + wordsDone,
-        'Typos made & corrected: ' + typoCount,
-        'Total time: ' + mins + 'm ' + secs + 's',
-        'API saves: ' + saveCount,
+        `Label: ${sessionLabel}`,
+        `Words written: ${wordsDone}`,
+        `Typos corrected: ${typoCount}`,
+        `Total time: ${mins}m ${secs}s`,
+        `API saves: ${saveCount}`,
       ].forEach(line => {
-        const d = document.createElement('div'); d.textContent = line; summary.appendChild(d);
+        const d = document.createElement('div'); d.textContent = line; summaryEl.appendChild(d);
       });
 
-      // If queue has more items, run next
+      // Advance queue
       currentQueueIndex++;
       if (currentQueueIndex < sessionQueue.length) {
         const next = sessionQueue[currentQueueIndex];
         addLog(`Queue: starting next section — "${next.label}"`, 'highlight');
         renderQueue();
-        document.getElementById('content').value = next.content;
+        document.getElementById('content').value       = next.content;
         document.getElementById('session-label').value = next.label;
-        document.getElementById('doc-title').value = next.docTitle;
+        document.getElementById('doc-title').value     = next.docTitle;
         await new Promise(r => setTimeout(r, 1500));
         await startWriting();
         return;
       }
 
-      markDone(4);
-      goToStep(4);
+      markDone(4); goToStep(4);
       document.getElementById('progress-bar').style.width = '100%';
     }
 
-  } catch (err) {
+  } catch(err) {
     addLog(`Error: ${err.message}`, 'error');
     document.getElementById('status-badge').textContent = 'Error';
-    document.getElementById('status-badge').className = 'status-badge';
+    document.getElementById('status-badge').className   = 'status-badge';
     console.error(err);
   }
 }
 
-// ─── Controls ─────────────────────────────────────────────────────────────
+// ─── Controls ─────────────────────────────────────────────────────────────────
 function togglePause() {
   isPaused = !isPaused;
-  document.getElementById('pause-btn').textContent = isPaused ? 'Resume' : 'Pause';
+  document.getElementById('pause-btn').textContent    = isPaused ? 'Resume' : 'Pause';
   document.getElementById('status-badge').textContent = isPaused ? 'Paused' : 'Running';
-  document.getElementById('status-badge').className = isPaused ? 'status-badge paused' : 'status-badge running';
-  const manBtn = document.getElementById('manual-advance-btn');
-  manBtn.classList.toggle('visible', isPaused);
-  addLog(isPaused ? 'Paused — press Space or click Resume. Click Step to insert one word.' : 'Resumed.', 'highlight');
+  document.getElementById('status-badge').className   = isPaused ? 'status-badge paused' : 'status-badge running';
+  document.getElementById('manual-advance-btn').classList.toggle('visible', isPaused);
+  addLog(isPaused ? 'Paused. Click Step to manually advance one chunk.' : 'Resumed.', 'highlight');
 }
 
 function stopWriting() {
   if (!confirm('Stop the writing session? Progress so far is saved in the doc.')) return;
   isStopped = true;
   clearTimeout(writeTimer);
+  clearInterval(timerInterval);
   clearCheckpoint();
   document.getElementById('status-badge').textContent = 'Stopped';
-  document.getElementById('status-badge').className = 'status-badge';
+  document.getElementById('status-badge').className   = 'status-badge';
   addLog('Session stopped by user.', 'error');
 }
 
-// ─── Init ─────────────────────────────────────────────────────────────────
+// ─── Keyboard shortcuts ───────────────────────────────────────────────────────
+window.addEventListener('beforeunload', (e) => {
+  if (!isStopped && sessionStart && charCount > 0) {
+    e.preventDefault();
+    e.returnValue = 'A writing session is in progress. Leave and lose progress?';
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) {
+    if (sessionStart && !isStopped) { e.preventDefault(); togglePause(); }
+  }
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
   initOfflineDetection();
   checkForRestore();
