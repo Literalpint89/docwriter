@@ -862,7 +862,10 @@ function renderQueue() {
   sessionQueue.forEach((item, i) => {
     const el = document.createElement('div');
     el.className = 'queue-item' + (i === currentQueueIndex ? ' active-q' : '') + (i < currentQueueIndex ? ' done-q' : '');
-    el.innerHTML = `<span class="q-num">${i + 1}</span><span class="q-label">${item.label}</span><span class="q-words">${item.words}w</span>`;
+    const numEl = document.createElement('span'); numEl.className = 'q-num'; numEl.textContent = i + 1;
+    const lblEl = document.createElement('span'); lblEl.className = 'q-label'; lblEl.textContent = item.label;
+    const wrdEl = document.createElement('span'); wrdEl.className = 'q-words'; wrdEl.textContent = item.words + 'w';
+    el.appendChild(numEl); el.appendChild(lblEl); el.appendChild(wrdEl);
     list.appendChild(el);
   });
 }
@@ -1065,6 +1068,7 @@ function startNewSession() {
   currentQueueIndex = 0;
   document.getElementById('queue-section').style.display = 'none';
   document.getElementById('queue-list').innerHTML = '';
+  document.getElementById('doc-link-card').classList.remove('visible');
   for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
   document.getElementById('step-1').classList.add('done');
   document.getElementById('step-2').classList.add('active');
@@ -1074,8 +1078,15 @@ function startNewSession() {
 // ─── Crash restore ────────────────────────────────────────────────────────
 function saveCheckpoint(wordIndex, wordObjs, settings) {
   try {
-    localStorage.setItem('dw_checkpoint', JSON.stringify({ wordIndex, wordObjs, settings, docId, ts: Date.now() }));
-  } catch(e) {}
+    const data = JSON.stringify({ wordIndex, wordObjs, settings, docId, ts: Date.now() });
+    if (data.length > 4 * 1024 * 1024) { // warn if approaching 5MB limit
+      addLog('Checkpoint too large to save — crash restore unavailable for this session.', '');
+      return;
+    }
+    localStorage.setItem('dw_checkpoint', data);
+  } catch(e) {
+    addLog('Checkpoint save failed (' + e.message + ') — crash restore unavailable.', '');
+  }
 }
 
 function clearCheckpoint() {
@@ -1308,25 +1319,6 @@ function updateAuthBar(state) {
 }
 
 // ─── 8. Swap token mid-session ────────────────────────────────────────────
-function showTokenSwap() { document.getElementById('token-swap-bar').classList.add('visible'); }
-function hideTokenSwap() { document.getElementById('token-swap-bar').classList.remove('visible'); }
-function swapToken() {
-  const t = document.getElementById('swap-token-input').value.trim();
-  if (!t) { alert('Paste a token first.'); return; }
-  if (!t.startsWith('ya29.')) { addLog('Invalid token format.', 'error'); return; }
-  accessToken    = t;
-  tokenExpiresAt = Date.now() + (55 * 60 * 1000);
-  document.getElementById('auth-masked').textContent        = maskToken(t);
-  document.getElementById('panel-auth-token').textContent   = maskToken(t);
-  document.getElementById('swap-token-input').value = '';
-  hideTokenSwap();
-  updateAuthDots('green');
-  updateAuthBar('');
-  startTokenExpireWarning();
-  consecutiveErrors = 0;
-  addLog('Token swapped (' + maskToken(t) + '). Session continuing.', 'success');
-  if (isPaused && sessionStart) togglePause();
-}
 
 // ─── 9. Offline detection ─────────────────────────────────────────────────
 function initOfflineDetection() {
@@ -1410,285 +1402,38 @@ function signOut() {
   addLog('Disconnected.', '');
 }
 
-// ─── Session queue ────────────────────────────────────────────────────────
-function addToQueue() {
-  const content = document.getElementById('content').value.trim();
-  const label = document.getElementById('session-label').value.trim();
-  const docMode = document.getElementById('doc-mode').value;
-  const docTitle = document.getElementById('doc-title').value.trim() || 'My Document';
-  const existingId = document.getElementById('existing-doc-id').value.trim();
-  if (!content) { alert('Paste some content first.'); return; }
-  const words = content.trim().split(/\s+/).length;
-  const entry = { content, label: label || `Section ${sessionQueue.length + 1}`, docMode, docTitle, existingId, words };
-  sessionQueue.push(entry);
-  renderQueue();
-  document.getElementById('content').value = '';
-  document.getElementById('session-label').value = '';
-  document.getElementById('queue-section').style.display = 'block';
-}
 
-function renderQueue() {
-  const list = document.getElementById('queue-list');
-  list.innerHTML = '';
-  sessionQueue.forEach((item, i) => {
-    const el = document.createElement('div');
-    el.className = 'queue-item' + (i === currentQueueIndex ? ' active-q' : '') + (i < currentQueueIndex ? ' done-q' : '');
-    el.innerHTML = `<span class="q-num">${i + 1}</span><span class="q-label">${item.label}</span><span class="q-words">${item.words}w</span>`;
-    list.appendChild(el);
-  });
-}
 
-// ─── Session templates ────────────────────────────────────────────────────
-function applyTemplate(tpl) {
-  const dur = document.getElementById('duration');
-  const style = document.getElementById('style');
-  const typo = document.getElementById('typo-rate');
-  if (tpl === 'essay')    { dur.value = '120'; style.value = 'steady'; typo.value = 'low'; }
-  if (tpl === 'report')   { dur.value = '240'; style.value = 'slow';   typo.value = 'low'; }
-  if (tpl === 'quick')    { dur.value = '30';  style.value = 'burst';  typo.value = 'medium'; }
-  if (tpl === 'longform') { dur.value = '360'; style.value = 'steady'; typo.value = 'low'; }
-}
 
-// ─── Speed multiplier ─────────────────────────────────────────────────────
-function updateSpeedMultiplier(val) {
-  speedMultiplier = 100 / parseInt(val);
-  const display = (parseInt(val) / 100).toFixed(2).replace(/\.?0+$/, '');
-  document.getElementById('speed-val').textContent = display + '×';
-}
 
-// ─── Token swap ───────────────────────────────────────────────────────────
-function showTokenSwap() {
-  document.getElementById('token-swap-bar').classList.add('visible');
-}
-function hideTokenSwap() {
-  document.getElementById('token-swap-bar').classList.remove('visible');
-}
-function swapToken() {
-  const t = document.getElementById('swap-token-input').value.trim();
-  if (!t) { alert('Paste a token first.'); return; }
-  accessToken = t;
-  hideTokenSwap();
-  addLog('Token swapped. Session will continue.', 'success');
-  if (isPaused) { togglePause(); }
-}
 
-// ─── Manual advance ───────────────────────────────────────────────────────
-function manualAdvance() {
-  if (!isPaused) return;
-  manualAdvancePending = true;
-}
+
+
+
+
+
+
+
+
 
 // ─── Pre-flight checklist ─────────────────────────────────────────────────
-async function runPreflight() {
-  const pf = document.getElementById('preflight');
-  pf.classList.add('visible');
+async 
 
-  // Remove any previous proceed-anyway button
-  const oldBtn = document.getElementById('pf-proceed-btn');
-  if (oldBtn) oldBtn.remove();
 
-  const setItem = (id, state, text) => {
-    const el = document.getElementById(id);
-    el.className = 'preflight-item ' + state;
-    el.textContent = (state === 'ok' ? '✓' : state === 'fail' ? '✗' : state === 'warn' ? '⚠' : '◌') + ' ' + text;
-  };
 
-  setItem('pf-token', 'checking', 'Token — checking...');
-  setItem('pf-content', 'checking', 'Content — checking...');
-  setItem('pf-doc', 'checking', 'Document access — pending...');
 
-  const content = document.getElementById('content').value.trim();
-  await new Promise(r => setTimeout(r, 300));
 
-  // ── Token check ────────────────────────────────────────────────────────
-  if (!accessToken) {
-    setItem('pf-token', 'fail', 'Token — missing. Go back to step 1.');
-    return;
-  }
 
-  // Verify token actually works with a lightweight API call
-  try {
-    const tokenTest = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
-    const tokenData = await tokenTest.json();
-    if (tokenData.error) {
-      setItem('pf-token', 'fail', 'Token — invalid or expired. Get a new one from OAuth Playground.');
-      return;
-    }
-    const secsLeft = parseInt(tokenData.expires_in || 0);
-    const minsLeft = Math.floor(secsLeft / 60);
-    setItem('pf-token', 'ok', `Token — valid (${minsLeft} min remaining)`);
-  } catch(e) {
-    setItem('pf-token', 'ok', 'Token — present (could not verify expiry)');
-  }
 
-  // ── Content check ──────────────────────────────────────────────────────
-  if (!content) {
-    setItem('pf-content', 'fail', 'Content — empty. Go back to step 2 and paste your text.');
-    return;
-  }
-  const wc = content.trim().split(/\s+/).length;
-  setItem('pf-content', 'ok', `Content — ${wc} words ready`);
 
-  // ── Doc check ──────────────────────────────────────────────────────────
-  setItem('pf-doc', 'checking', 'Document access — verifying...');
-  const mode = document.getElementById('doc-mode').value;
 
-  if (mode === 'new') {
-    setItem('pf-doc', 'ok', 'Document — new doc will be created on start');
-    await new Promise(r => setTimeout(r, 400));
-    pf.classList.remove('visible');
-    startWriting();
-    return;
-  }
 
-  // Existing doc — try to fetch it
-  const input = document.getElementById('existing-doc-id').value.trim();
-  if (!input) {
-    setItem('pf-doc', 'fail', 'Document — no URL or ID entered. Go back and paste your doc URL.');
-    return;
-  }
 
-  let testId;
-  try { testId = extractDocId(input); } catch(e) {
-    setItem('pf-doc', 'fail', 'Document — could not parse URL. Paste the full Google Doc URL.');
-    return;
-  }
 
-  try {
-    const res = await fetch(`https://docs.googleapis.com/v1/documents/${testId}`, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
-    });
 
-    if (res.status === 401) {
-      setItem('pf-doc', 'warn', 'Document — token lacks Docs API scope. Re-authorise with Docs API v1 selected.');
-      addProceedAnyway(pf);
-      return;
-    }
-    if (res.status === 403) {
-      setItem('pf-doc', 'warn', 'Document — permission denied. Make sure you own or have edit access to this doc.');
-      addProceedAnyway(pf);
-      return;
-    }
-    if (res.status === 404) {
-      setItem('pf-doc', 'fail', 'Document — not found. Check the URL is correct and the doc exists.');
-      return;
-    }
-    if (!res.ok) {
-      const body = await res.text();
-      setItem('pf-doc', 'warn', `Document — API returned ${res.status}. Proceed with caution.`);
-      console.warn('Doc check response:', body);
-      addProceedAnyway(pf);
-      return;
-    }
 
-    const doc = await res.json();
-    const title = doc.title || testId;
-    setItem('pf-doc', 'ok', `Document — "${title}" found and accessible`);
 
-  } catch(e) {
-    setItem('pf-doc', 'warn', 'Document — network error during check. Proceeding anyway.');
-    addProceedAnyway(pf);
-    return;
-  }
 
-  await new Promise(r => setTimeout(r, 400));
-  pf.classList.remove('visible');
-  startWriting();
-}
-
-function addProceedAnyway(pf) {
-  // Add a "proceed anyway" button below the checklist for warnings (not hard failures)
-  const btn = document.createElement('button');
-  btn.id = 'pf-proceed-btn';
-  btn.className = 'btn btn-ghost';
-  btn.style.cssText = 'margin-top:12px;font-size:11px;padding:7px 14px;';
-  btn.textContent = 'Proceed anyway →';
-  btn.onclick = () => { pf.classList.remove('visible'); btn.remove(); startWriting(); };
-  pf.appendChild(btn);
-}
-
-// ─── Session reset (Write another section) ────────────────────────────────
-function resetToStep2() {
-  // Keep token and docId, return to step 2 for more content
-  document.getElementById('content').value = '';
-  document.getElementById('session-label').value = '';
-  document.getElementById('doc-mode').value = 'existing';
-  toggleDocMode();
-  if (docId) {
-    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${docId}/edit`;
-  }
-  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
-  document.getElementById('step-1').classList.add('done');
-  document.getElementById('step-2').classList.add('active');
-  addLog('Ready for next section. Token and doc preserved.', 'highlight');
-}
-
-function startNewSession() {
-  // Full reset — keep token only
-  docId = null;
-  document.getElementById('content').value = '';
-  document.getElementById('session-label').value = '';
-  document.getElementById('doc-title').value = '';
-  document.getElementById('existing-doc-id').value = '';
-  document.getElementById('doc-mode').value = 'new';
-  toggleDocMode();
-  sessionQueue = [];
-  currentQueueIndex = 0;
-  document.getElementById('queue-section').style.display = 'none';
-  document.getElementById('queue-list').innerHTML = '';
-  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active', 'done');
-  document.getElementById('step-1').classList.add('done');
-  document.getElementById('step-2').classList.add('active');
-  addLog('New session started. Token preserved.', 'highlight');
-}
-
-// ─── Crash restore ────────────────────────────────────────────────────────
-function saveCheckpoint(wordIndex, wordObjs, settings) {
-  try {
-    localStorage.setItem('dw_checkpoint', JSON.stringify({ wordIndex, wordObjs, settings, docId, ts: Date.now() }));
-  } catch(e) {}
-}
-
-function clearCheckpoint() {
-  try { localStorage.removeItem('dw_checkpoint'); } catch(e) {}
-}
-
-function checkForRestore() {
-  try {
-    const raw = localStorage.getItem('dw_checkpoint');
-    if (!raw) return;
-    const cp = JSON.parse(raw);
-    if (Date.now() - cp.ts > 24 * 60 * 60 * 1000) { clearCheckpoint(); return; }
-    window._pendingRestore = cp;
-    document.getElementById('restore-banner').classList.add('visible');
-  } catch(e) {}
-}
-
-function restoreSession() {
-  const cp = window._pendingRestore;
-  if (!cp) return;
-  document.getElementById('restore-banner').classList.remove('visible');
-  if (cp.settings) {
-    document.getElementById('duration').value = cp.settings.duration || '30';
-    document.getElementById('style').value = cp.settings.style || 'burst';
-    document.getElementById('typo-rate').value = cp.settings.typoRate || 'low';
-  }
-  if (cp.docId) {
-    docId = cp.docId;
-    document.getElementById('doc-mode').value = 'existing';
-    document.getElementById('existing-doc-id').value = `https://docs.google.com/document/d/${cp.docId}/edit`;
-    toggleDocMode();
-  }
-  addLog('Restored checkpoint. Click Start writing to resume.', 'highlight');
-  window._restoreWordIndex = cp.wordIndex;
-  window._restoreWordObjs = cp.wordObjs;
-}
-
-function clearRestore() {
-  clearCheckpoint();
-  document.getElementById('restore-banner').classList.remove('visible');
-  window._pendingRestore = null;
-}
 
 // ─── Focus window lock ────────────────────────────────────────────────────
 window.addEventListener('beforeunload', (e) => {
@@ -1708,89 +1453,23 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ─── Auth config (moved to auth management block above) ──────────────────
-function openOAuthPlayground() {
-  const url = 'https://developers.google.com/oauthplayground/#step1=https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/drive&url=https://&content_type=application/json&http_method=GET&useDefaultOauthCred=unchecked&oauthEndpointSelect=Google&oauthAuthEndpointValue=https://accounts.google.com/o/oauth2/auth&oauthTokenEndpointValue=https://oauth2.googleapis.com/token&includeCredentials=unchecked&accessTokenType=bearer&autoRefreshToken=unchecked&accessType=offline&forceAprovalPrompt=checked&response_type=code';
-  window.open(url, '_blank');
-}
 
-async function pasteFromClipboard() {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (text && text.startsWith('ya29.')) {
-      document.getElementById('manual-token').value = text;
-      showTokenStatus('Token pasted from clipboard.', 'success');
-    } else {
-      showTokenStatus("Clipboard does not contain a valid token (should start with ya29.).", "error");
-    }
-  } catch(e) {
-    showTokenStatus('Clipboard access denied — please paste manually.', 'error');
-  }
-}
 
-function showTokenStatus(msg, type) {
-  const el = document.getElementById('token-status');
-  el.style.display = 'block';
-  el.style.background = type === 'success' ? 'rgba(74,240,160,0.08)' : 'rgba(240,74,74,0.08)';
-  el.style.color = type === 'success' ? 'var(--success)' : 'var(--danger)';
-  el.textContent = msg;
-}
+async 
 
-function handleManualToken() {
-  const token = document.getElementById('manual-token').value.trim();
-  if (!token) { alert('Please paste your access token.'); return; }
-  if (!token.startsWith("ya29.")) {
-    showTokenStatus("This doesn't look like a valid token — it should start with ya29.", "error");
-    return;
-  }
-  accessToken    = token;
-  tokenExpiresAt = Date.now() + (55 * 60 * 1000); // assume ~55 min left
-  startTokenExpireWarning();
-  markDone(1);
-  goToStep(2);
-  document.getElementById('progress-panel').style.display = 'block';
-  addLog('Token connected. Valid for ~1 hour — app will warn you before it expires.', 'success');
-}
 
-function startTokenExpireWarning() {
-  clearTimeout(tokenExpireTimer);
-  // Warn at 10 minutes remaining
-  const warnIn = tokenExpiresAt - Date.now() - (10 * 60 * 1000);
-  if (warnIn > 0) {
-    tokenExpireTimer = setTimeout(showExpireWarning, warnIn);
-  }
-  startExpiryCountdown();
-}
 
-function showExpireWarning() {
-  addLog('Token expires in ~10 minutes. Click "Swap token" in the progress panel to refresh.', 'error');
-  // Flash the swap token bar
-  document.getElementById('token-swap-bar').classList.add('visible');
-}
 
-function startExpiryCountdown() {
-  clearInterval(window._expiryInterval);
-  window._expiryInterval = setInterval(() => {
-    const secsLeft = Math.max(0, Math.round((tokenExpiresAt - Date.now()) / 1000));
-    const m = Math.floor(secsLeft / 60), s = secsLeft % 60;
-    const el = document.getElementById('auth-expiry-display');
-    if (el) el.textContent = secsLeft > 0 ? `Token expires in ${m}:${s.toString().padStart(2,'0')}` : 'Token expired — swap token to continue.';
-    if (secsLeft === 0) { clearInterval(window._expiryInterval); showExpireWarning(); }
-  }, 1000);
-}
+
+
+
+
+
+
 
 // ─── Sign out ─────────────────────────────────────────────────────────────
 // ─── Sign out ─────────────────────────────────────────────────────────────
-// ─── Sign out ─────────────────────────────────────────────────────────────
-function signOut() {
-  accessToken = null;
-  tokenExpiresAt = 0;
-  clearTimeout(tokenExpireTimer);
-  clearInterval(window._expiryInterval);
-  for (let i = 1; i <= 4; i++) document.getElementById(`step-${i}`).classList.remove('active','done');
-  document.getElementById('step-1').classList.add('active');
-  addLog('Disconnected.', '');
-}
+
 
 // ─── Step navigation ─────────────────────────────────────────────────────
 function goToStep(n) {
@@ -1811,7 +1490,9 @@ function addLog(msg, type = '') {
   const now = new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const el = document.createElement('div');
   el.className = `log-entry ${type}`;
-  el.innerHTML = `<span class="ts">${now}</span><span class="msg">${msg}</span>`;
+  const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = now;
+  const ms = document.createElement('span'); ms.className = 'msg'; ms.textContent = msg;
+  el.appendChild(ts); el.appendChild(ms);
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
 }
@@ -1946,17 +1627,26 @@ function computeDelay(wordObj, i, totalWords, msPerWord, style, personality, ela
 }
 
 // Build the extra pause to add after computing base delay
+// Always returns { extra, isThink, isDistraction, isHeading }
 function computeExtraPause(wordObj, i, prevWordStr, totalWords, msPerWord, style, personality, elapsed, totalDurationMs) {
   const { word, isParaBreak } = wordObj;
   let extra = 0;
+  let isThink = false, isDistraction = false, isHeading = false;
 
-  // Paragraph break — long pause before new paragraph
+  // Paragraph break — long pause, return immediately
   if (isParaBreak) {
     extra += msPerWord * (2 + Math.random() * 3);
-    return extra;
+    return { extra, isThink, isDistraction, isHeading };
   }
 
-  // Sentence end in previous word — pause after full stop etc
+  // Heading pause — ## marker or all-caps 4+ letter word or after colon
+  const isFirstWordOfPara = (prevWordStr === null);
+  if (wordObj.isHeading || looksLikeHeading(word, prevWordStr, isFirstWordOfPara)) {
+    extra += msPerWord * (2 + Math.random() * 2.5);
+    isHeading = true;
+  }
+
+  // Sentence end in previous word
   if (prevWordStr && isSentenceEnd(prevWordStr)) {
     extra += msPerWord * (0.8 + Math.random() * 1.2);
   }
@@ -1966,29 +1656,21 @@ function computeExtraPause(wordObj, i, prevWordStr, totalWords, msPerWord, style
     extra += msPerWord * (0.3 + Math.random() * 0.4);
   }
 
-  // Heading pause — fires on ## marked headings, all-caps words, or words after a colon
-  const isFirstWordOfPara = (prevWordStr === null);
-  if (wordObj.isHeading || looksLikeHeading(word, prevWordStr, isFirstWordOfPara)) {
-    extra += msPerWord * (2 + Math.random() * 2.5);
-  }
-
   // Long word slowdown
   if (word.replace(/[^a-zA-Z]/g, '').length >= personality.longWordThreshold) {
     extra += msPerWord * (0.2 + Math.random() * 0.3);
   }
 
-  // Thinking pause (random, every ~10–14 words)
+  // Thinking pause
   if (i > 0 && Math.random() < personality.thinkFrequency) {
-    const thinkMs = msPerWord * (0.8 + Math.random() * 1.2);
-    extra += thinkMs;
-    return { extra, isThink: true };
+    extra += msPerWord * (0.8 + Math.random() * 1.2);
+    isThink = true;
   }
 
-  // Distraction — very rare, 30–90 second pause
+  // Distraction — very rare long pause
   if (i > 10 && Math.random() < personality.distractionChance) {
-    const distractMs = (30 + Math.random() * 60) * 1000;
-    extra += distractMs;
-    return { extra, isDistraction: true };
+    extra += (30 + Math.random() * 60) * 1000;
+    isDistraction = true;
   }
 
   // Warmup — first N words are slower
@@ -1996,14 +1678,14 @@ function computeExtraPause(wordObj, i, prevWordStr, totalWords, msPerWord, style
     extra += msPerWord * (0.3 + Math.random() * 0.4) * (1 - i / personality.warmupWords);
   }
 
-  // Fatigue — slow down gradually in the second half
+  // Fatigue — slow down gradually in second half
   const progress = i / totalWords;
   if (progress > personality.fatigueStart) {
     const fatigueFactor = (progress - personality.fatigueStart) / (1 - personality.fatigueStart);
     extra += msPerWord * fatigueFactor * (0.2 + Math.random() * 0.3);
   }
 
-  return { extra, isThink: false, isDistraction: false };
+  return { extra, isThink, isDistraction, isHeading };
 }
 
 // ─── Typo engine ─────────────────────────────────────────────────────────
@@ -2139,20 +1821,20 @@ async function testConnection() {
   document.getElementById('log').innerHTML = '';
   addLog('Testing Google Docs connection...', 'highlight');
   try {
-    const res  = await authFetch('https://docs.googleapis.com/v1/documents', {
-      method: 'POST',
-      body: JSON.stringify({ title: 'DocWriter Test — Delete Me' })
-    });
+    // Use tokeninfo — read-only, creates no docs, no Drive clutter
+    const res  = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
     const data = await res.json();
-    if (data.documentId) {
-      updateAuthDots('green');
-      addLog('Connection works! Test doc created: ' + data.documentId, 'success');
-      addLog('Open: https://docs.google.com/document/d/' + data.documentId + '/edit', 'success');
+    if (data.error) {
+      updateAuthDots('red');
+      addLog('Connection failed: ' + data.error, 'error');
     } else {
-      addLog('API responded but no doc ID: ' + JSON.stringify(data), 'error');
+      const secs = parseInt(data.expires_in || 0);
+      const m = Math.floor(secs / 60), s = secs % 60;
+      updateAuthDots('green');
+      addLog('Token valid — ' + m + ':' + String(s).padStart(2,'0') + ' remaining. Scopes: ' + (data.scope || 'unknown'), 'success');
     }
   } catch (err) {
-    addLog('Connection failed: ' + err.message, 'error');
+    addLog('Connection test failed: ' + err.message, 'error');
   }
 }
 
@@ -2173,6 +1855,8 @@ async function startWriting() {
   isPaused = false;
   saveCount = 0;
   charCount = 0;
+  rateLimitUntil = 0;
+  consecutiveErrors = 0;
   totalChars = content.length;
   totalDurationMs = durationMins * 60 * 1000;
   sessionStart = Date.now();
@@ -2208,8 +1892,6 @@ async function startWriting() {
       document.getElementById('doc-link-href').href = docUrl;
       document.getElementById('doc-link-card').classList.add('visible');
       addLog(`Using existing doc: ${docId}`, 'success');
-      saveCount++;
-      updateStats();
     } else {
       addLog(`Creating document: "${title}"`, 'highlight');
       const doc = await createDoc(title);
@@ -2219,8 +1901,6 @@ async function startWriting() {
       document.getElementById('doc-link-href').href = docUrl;
       document.getElementById('doc-link-card').classList.add('visible');
       addLog(`Doc created. ID: ${docId}`, 'success');
-      saveCount++;
-      updateStats();
     }
 
     // Build word list preserving paragraph breaks as tokens
@@ -2293,6 +1973,7 @@ async function startWriting() {
 
       if (extra.isDistraction) addLog(`...distracted (${Math.round(extraMs/1000)}s)`, '');
       else if (extra.isThink) addLog(`...thinking pause`, '');
+      else if (extra.isHeading) addLog(`...heading pause before "${word}"`, 'highlight');
 
       if (i > startIndex) await sleepWithPauseCheck(delay + extraMs);
       if (isStopped) break;
@@ -2301,34 +1982,42 @@ async function startWriting() {
       const typoWord = generateTypo(word, typoRate);
       const textToInsert = isFirst ? word : ' ' + word;
 
+      // Typo sequence runs once and independently — not retried
+      if (typoWord) {
+        try {
+          const typoInsert = isFirst ? typoWord : ' ' + typoWord;
+          await appendToDoc(docId, typoInsert, currentEndIndex);
+          currentEndIndex += typoInsert.length;
+          charCount += typoInsert.length;
+          saveCount++;
+          updateStats();
+          addLog(`Typed "${typoWord}" (typo)`);
+          typoCount++;
+
+          await sleepWithPauseCheck(correctionDelay());
+          if (isStopped) break;
+
+          const deleteStart = currentEndIndex - typoInsert.length + (isFirst ? 0 : 1);
+          await deleteFromDoc(docId, deleteStart, currentEndIndex);
+          currentEndIndex = deleteStart;
+          charCount -= typoInsert.length;
+          saveCount++;
+          updateStats();
+
+          await sleepWithPauseCheck(200 + Math.random() * 350);
+          if (isStopped) break;
+        } catch(typoErr) {
+          // If typo sequence fails, re-fetch position and continue to correct insert
+          addLog(`Typo sequence failed — recovering position.`, 'error');
+          try { currentEndIndex = await getDocEndIndex(docId); } catch(e) {}
+        }
+      }
+
+      // Correct word insert — retried up to 3 times
       let retries = 0;
       let success = false;
       while (!success && retries < 3) {
         try {
-          if (typoWord && retries === 0) {
-            const typoInsert = isFirst ? typoWord : ' ' + typoWord;
-            await appendToDoc(docId, typoInsert, currentEndIndex);
-            currentEndIndex += typoInsert.length;
-            charCount += typoInsert.length;
-            saveCount++;
-            updateStats();
-            addLog(`Typed "${typoWord}" (typo)`);
-            typoCount++;
-
-            await sleepWithPauseCheck(correctionDelay());
-            if (isStopped) break;
-
-            const deleteStart = currentEndIndex - typoInsert.length + (isFirst ? 0 : 1);
-            await deleteFromDoc(docId, deleteStart, currentEndIndex);
-            currentEndIndex = deleteStart;
-            charCount -= typoInsert.length;
-            saveCount++;
-            updateStats();
-
-            await sleepWithPauseCheck(200 + Math.random() * 350);
-            if (isStopped) break;
-          }
-
           await appendToDoc(docId, textToInsert, currentEndIndex);
           currentEndIndex += textToInsert.length;
           charCount += textToInsert.length;
@@ -2339,7 +2028,6 @@ async function startWriting() {
           else if (wordsDone % 10 === 0) addLog(`Wrote ${wordsDone}/${totalWords} words`);
           prevWordStr = word;
           success = true;
-
         } catch (err) {
           retries++;
           if (retries < 3) {
@@ -2361,15 +2049,21 @@ async function startWriting() {
       const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
       document.getElementById('status-badge').textContent = 'Complete';
       document.getElementById('status-badge').className = 'status-badge done';
+      isStopped = true; // prevent beforeunload on completed sessions
       addLog(`Writing complete. ${saveCount} version history entries created.`, 'success');
 
       // Populate complete summary
-      document.getElementById('complete-summary').innerHTML =
-        `Label: ${sessionLabel}<br>` +
-        `Words written: ${wordsDone}<br>` +
-        `Typos made &amp; corrected: ${typoCount}<br>` +
-        `Total time: ${mins}m ${secs}s<br>` +
-        `API saves: ${saveCount}`;
+      const summary = document.getElementById('complete-summary');
+      summary.textContent = '';
+      [
+        'Label: ' + sessionLabel,
+        'Words written: ' + wordsDone,
+        'Typos made & corrected: ' + typoCount,
+        'Total time: ' + mins + 'm ' + secs + 's',
+        'API saves: ' + saveCount,
+      ].forEach(line => {
+        const d = document.createElement('div'); d.textContent = line; summary.appendChild(d);
+      });
 
       // If queue has more items, run next
       currentQueueIndex++;
@@ -2381,7 +2075,7 @@ async function startWriting() {
         document.getElementById('session-label').value = next.label;
         document.getElementById('doc-title').value = next.docTitle;
         await new Promise(r => setTimeout(r, 1500));
-        startWriting();
+        await startWriting();
         return;
       }
 
