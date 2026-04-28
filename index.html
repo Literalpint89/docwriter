@@ -912,118 +912,68 @@ function manualAdvance() {
 
 // ─── Pre-flight checklist ─────────────────────────────────────────────────
 async function runPreflight() {
+  // Hard requirements — block if these fail
+  if (!accessToken) { alert('No token — go back to Step 1 and connect first.'); return; }
+  const content = document.getElementById('content').value.trim();
+  if (!content) { alert('No content — go back to Step 2 and paste your text.'); return; }
+
   const pf = document.getElementById('preflight');
   pf.classList.add('visible');
-
-  // Remove any previous proceed-anyway button
   const oldBtn = document.getElementById('pf-proceed-btn');
   if (oldBtn) oldBtn.remove();
 
   const setItem = (id, state, text) => {
     const el = document.getElementById(id);
+    if (!el) return;
     el.className = 'preflight-item ' + state;
     el.textContent = (state === 'ok' ? '✓' : state === 'fail' ? '✗' : state === 'warn' ? '⚠' : '◌') + ' ' + text;
   };
 
   setItem('pf-token', 'checking', 'Token — checking...');
-  setItem('pf-content', 'checking', 'Content — checking...');
-  setItem('pf-doc', 'checking', 'Document access — pending...');
+  setItem('pf-content', 'ok', `Content — ${content.split(/\s+/).length} words ready`);
+  setItem('pf-doc', 'checking', 'Document — checking...');
 
-  const content = document.getElementById('content').value.trim();
-  await new Promise(r => setTimeout(r, 300));
-
-  // ── Token check ────────────────────────────────────────────────────────
-  if (!accessToken) {
-    setItem('pf-token', 'fail', 'Token — missing. Go back to step 1.');
-    return;
-  }
-
-  // Verify token actually works with a lightweight API call
+  // Token check — non-blocking, just informational
   try {
     const tokenTest = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + accessToken);
     const tokenData = await tokenTest.json();
     if (tokenData.error) {
-      setItem('pf-token', 'fail', 'Token — invalid or expired. Get a new one from OAuth Playground.');
-      return;
+      setItem('pf-token', 'warn', 'Token — may be expired. Swap if writes fail.');
+    } else {
+      const minsLeft = Math.floor(parseInt(tokenData.expires_in || 0) / 60);
+      setItem('pf-token', 'ok', `Token — valid (${minsLeft} min remaining)`);
     }
-    const secsLeft = parseInt(tokenData.expires_in || 0);
-    const minsLeft = Math.floor(secsLeft / 60);
-    setItem('pf-token', 'ok', `Token — valid (${minsLeft} min remaining)`);
   } catch(e) {
-    setItem('pf-token', 'ok', 'Token — present (could not verify expiry)');
+    setItem('pf-token', 'ok', 'Token — present');
   }
 
-  // ── Content check ──────────────────────────────────────────────────────
-  if (!content) {
-    setItem('pf-content', 'fail', 'Content — empty. Go back to step 2 and paste your text.');
-    return;
-  }
-  const wc = content.trim().split(/\s+/).length;
-  setItem('pf-content', 'ok', `Content — ${wc} words ready`);
-
-  // ── Doc check ──────────────────────────────────────────────────────────
-  setItem('pf-doc', 'checking', 'Document access — verifying...');
+  // Doc check — non-blocking
   const mode = document.getElementById('doc-mode').value;
-
   if (mode === 'new') {
     setItem('pf-doc', 'ok', 'Document — new doc will be created on start');
-    await new Promise(r => setTimeout(r, 400));
-    pf.classList.remove('visible');
-    startWriting();
-    return;
+  } else {
+    const input = document.getElementById('existing-doc-id').value.trim();
+    if (!input) {
+      setItem('pf-doc', 'warn', 'No doc URL entered — writing will fail. Go back and paste your doc URL.');
+    } else {
+      try {
+        const testId = extractDocId(input);
+        const res = await fetch(`https://docs.googleapis.com/v1/documents/${testId}`, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+        if (res.ok) {
+          const doc = await res.json();
+          setItem('pf-doc', 'ok', `Document — "${doc.title || testId}" accessible`);
+        } else {
+          setItem('pf-doc', 'warn', `Document — server returned ${res.status}. Will try anyway.`);
+        }
+      } catch(e) {
+        setItem('pf-doc', 'warn', 'Document — could not verify. Will try anyway.');
+      }
+    }
   }
 
-  // Existing doc — try to fetch it
-  const input = document.getElementById('existing-doc-id').value.trim();
-  if (!input) {
-    setItem('pf-doc', 'fail', 'Document — no URL or ID entered. Go back and paste your doc URL.');
-    return;
-  }
-
-  let testId;
-  try { testId = extractDocId(input); } catch(e) {
-    setItem('pf-doc', 'fail', 'Document — could not parse URL. Paste the full Google Doc URL.');
-    return;
-  }
-
-  try {
-    const res = await fetch(`https://docs.googleapis.com/v1/documents/${testId}`, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
-    });
-
-    if (res.status === 401) {
-      setItem('pf-doc', 'warn', 'Document — token lacks Docs API scope. Re-authorise with Docs API v1 selected.');
-      addProceedAnyway(pf);
-      return;
-    }
-    if (res.status === 403) {
-      setItem('pf-doc', 'warn', 'Document — permission denied. Make sure you own or have edit access to this doc.');
-      addProceedAnyway(pf);
-      return;
-    }
-    if (res.status === 404) {
-      setItem('pf-doc', 'fail', 'Document — not found. Check the URL is correct and the doc exists.');
-      return;
-    }
-    if (!res.ok) {
-      const body = await res.text();
-      setItem('pf-doc', 'warn', `Document — API returned ${res.status}. Proceed with caution.`);
-      console.warn('Doc check response:', body);
-      addProceedAnyway(pf);
-      return;
-    }
-
-    const doc = await res.json();
-    const title = doc.title || testId;
-    setItem('pf-doc', 'ok', `Document — "${title}" found and accessible`);
-
-  } catch(e) {
-    setItem('pf-doc', 'warn', 'Document — network error during check. Proceeding anyway.');
-    addProceedAnyway(pf);
-    return;
-  }
-
-  await new Promise(r => setTimeout(r, 400));
+  await new Promise(r => setTimeout(r, 500));
   pf.classList.remove('visible');
   startWriting();
 }
@@ -1417,23 +1367,6 @@ function signOut() {
 
 
 // ─── Pre-flight checklist ─────────────────────────────────────────────────
-async 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ─── Focus window lock ────────────────────────────────────────────────────
 window.addEventListener('beforeunload', (e) => {
@@ -1452,17 +1385,6 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
-
-
-
-async 
-
-
-
-
-
-
-
 
 
 
